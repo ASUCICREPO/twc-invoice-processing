@@ -39,7 +39,19 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
     const detectInvoiceLambda = new lambda.Function(this, 'detectInvoice', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/detectInvoice')
+      code: lambda.Code.fromAsset('lambda/detectInvoice',
+        {
+          bundling: {
+            image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+            command: [
+              'bash', '-c',
+              'pip install -r requirements.txt -t /asset-output && cp index.py /asset-output'
+            ],
+          },
+        }
+      ),
+      timeout: cdk.Duration.seconds(60),
+      memorySize: 256
     });
 
     // Create Step Functions State Machine
@@ -48,7 +60,8 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
     });
 
     const execDetectInvoiceLambda = new stepfunctions_tasks.LambdaInvoke(this, 'Detect Invoice in Email', {
-      lambdaFunction: detectInvoiceLambda
+      lambdaFunction: detectInvoiceLambda,
+      outputPath: '$.Payload'
     });
 
     const definition = new stepfunctions.Choice(this, 'Update Account Assignment?')
@@ -63,10 +76,13 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
     // Grant processIncomingEmail Lambda permission to start the Step Function Execution and read from S3 bucket
     stateMachine.grantStartExecution(processIncomingEmailLambda);
     incomingEmailBucket.grantRead(processIncomingEmailLambda);
+    incomingEmailBucket.grantReadWrite(detectInvoiceLambda)
 
     // Set environment variables for the processIncomingEmail Lambda function
     processIncomingEmailLambda.addEnvironment('STATE_MACHINE_ARN', stateMachine.stateMachineArn);
     processIncomingEmailLambda.addEnvironment('BUCKET_NAME', incomingEmailBucket.bucketName);
+    updateAccountAssignmentLambda.addEnvironment('BUCKET_NAME', incomingEmailBucket.bucketName);
+    detectInvoiceLambda.addEnvironment('BUCKET_NAME', incomingEmailBucket.bucketName);
 
     // Create SES Rule Set
     const sesRuleSet = new ses.ReceiptRuleSet(this, 'twc-email-rule-set', {
