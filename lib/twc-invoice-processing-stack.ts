@@ -36,10 +36,10 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
       code: lambda.Code.fromAsset('lambda/updateAccountAssignment')
     });
 
-    const detectInvoiceLambda = new lambda.Function(this, 'detectInvoiceLmabda', {
+    const detectInvoiceLambda = new lambda.Function(this, 'detectInvoice', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/detectInvoiceLambda')
+      code: lambda.Code.fromAsset('lambda/detectInvoice')
     });
 
     // Create Step Functions State Machine
@@ -51,7 +51,7 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
       lambdaFunction: detectInvoiceLambda
     });
 
-    const definition = new stepfunctions.Choice(this, 'Account Assignment?')
+    const definition = new stepfunctions.Choice(this, 'Update Account Assignment?')
       .when(stepfunctions.Condition.stringEquals('$.subjectContainsAccountAssignment', 'true'), execUpdateAccountAssignmentLambda)
       .otherwise(execDetectInvoiceLambda);
 

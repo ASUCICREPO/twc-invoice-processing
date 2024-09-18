@@ -21,8 +21,8 @@ def handler(event, context):
     msg = email.message_from_string(email_content)
     subject = msg['subject']
     
-    # Check if the subject contains "Account assignment"
-    subject_contains_account_assignment = "Account assignment" in subject
+    # Check if the subject contains "UPDATED ACCOUNT ASSIGNMENTS"
+    subject_contains_account_assignment = "UPDATED ACCOUNT ASSIGNMENTS" in subject
     
     # Start the Step Function execution
     state_machine_arn = os.environ['STATE_MACHINE_ARN']
