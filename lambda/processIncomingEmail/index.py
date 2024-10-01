@@ -1,4 +1,3 @@
-
 import json
 import boto3
 import os
@@ -13,16 +12,16 @@ def handler(event, context):
     message_id = ses_notification['mail']['messageId']
     bucket_name = os.environ['BUCKET_NAME']
     
-    # Retrieve the meail from S3
+    # Retrieve the mail from S3
     obj = s3.get_object(Bucket=bucket_name, Key=message_id)
     email_content = obj['Body'].read().decode('utf-8') 
     
     # Parse the email
     msg = email.message_from_string(email_content)
     subject = msg['subject']
-    
+    print(f'Email subject: f{subject}')
     # Check if the subject contains "UPDATED ACCOUNT ASSIGNMENTS"
-    subject_contains_account_assignment = "UPDATED ACCOUNT ASSIGNMENTS" in subject
+    subject_contains_account_assignment = "UPDATED ACCOUNT ASSIGNMENTS" in subject.upper()
     
     # Start the Step Function execution
     state_machine_arn = os.environ['STATE_MACHINE_ARN']

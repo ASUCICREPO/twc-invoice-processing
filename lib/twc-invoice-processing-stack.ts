@@ -39,7 +39,19 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
     const detectInvoiceLambda = new lambda.Function(this, 'detectInvoice', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/detectInvoice',
+      code: lambda.Code.fromAsset('lambda/detectInvoice'),
+    });
+
+    const processPDFAttachmentLambda = new lambda.Function(this, 'processPDFAttachment', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset('lambda/processPDFAttachment')
+    });
+
+    const processExcelAttachmentLambda = new lambda.Function(this, 'processExcelAttachment', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset('lambda/processExcelAttachment',
         {
           bundling: {
             image: lambda.Runtime.PYTHON_3_12.bundlingImage,
@@ -49,40 +61,131 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
             ],
           },
         }
-      ),
+      ),    
       timeout: cdk.Duration.seconds(60),
       memorySize: 256
     });
 
-    // Create Step Functions State Machine
-    const execUpdateAccountAssignmentLambda = new stepfunctions_tasks.LambdaInvoke(this, 'Update Account Assignment Details', {
-      lambdaFunction: updateAccountAssignmentLambda
+    const processDocAttachmentLambda = new lambda.Function(this, 'processDocAttachment', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset('lambda/processDocAttachment',
+        {
+          bundling: {
+            image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+            command: [
+              'bash', '-c',
+              'pip install -r requirements.txt -t /asset-output && cp index.py /asset-output'
+            ],
+          },
+        }
+      ),    
+      timeout: cdk.Duration.seconds(60),
+      memorySize: 256
     });
 
-    const execDetectInvoiceLambda = new stepfunctions_tasks.LambdaInvoke(this, 'Detect Invoice in Email', {
+    const processEmailBodyLambda = new lambda.Function(this, 'processEmailBody', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset('lambda/processEmailBody',
+        {
+          bundling: {
+            image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+            command: [
+              'bash', '-c',
+              'pip install -r requirements.txt -t /asset-output && cp index.py /asset-output'
+            ],
+          },
+        }),    
+        timeout: cdk.Duration.seconds(60),
+        memorySize: 256
+    });
+
+    const savePdfToS3Lambda = new lambda.Function(this, 'savePdfToS3', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset('lambda/savePdfToS3')
+    });
+
+    // Create Step Functions tasks
+    const updateAccountAssignmentTask = new stepfunctions_tasks.LambdaInvoke(this,'Update Account Assignment', {
+      lambdaFunction: updateAccountAssignmentLambda,
+      outputPath: '$.Payload'
+    });
+
+    const detectInvoiceTask = new stepfunctions_tasks.LambdaInvoke(this, 'Detect Invoice', {
       lambdaFunction: detectInvoiceLambda,
       outputPath: '$.Payload'
     });
 
-    const definition = new stepfunctions.Choice(this, 'Update Account Assignment?')
-      .when(stepfunctions.Condition.stringEquals('$.subjectContainsAccountAssignment', 'true'), execUpdateAccountAssignmentLambda)
-      .otherwise(execDetectInvoiceLambda);
+    const processPDFAttachmentTask = new stepfunctions_tasks.LambdaInvoke(this, 'Process PDF Attachment', {
+      lambdaFunction: processPDFAttachmentLambda,
+      outputPath: '$.Payload'
+    });
+
+    const processExcelAttachmentTask = new stepfunctions_tasks.LambdaInvoke(this, 'Process Excel Attachment', {
+      lambdaFunction: processExcelAttachmentLambda,
+      outputPath: '$.Payload'
+    });
+
+    const processDocAttachmentTask = new stepfunctions_tasks.LambdaInvoke(this, 'Process Doc Attachment', {
+      lambdaFunction: processDocAttachmentLambda,
+      outputPath: '$.Payload'
+    });
+
+    const processEmailBodyTask = new stepfunctions_tasks.LambdaInvoke(this, 'Process Email Body', {
+      lambdaFunction: processEmailBodyLambda,
+      outputPath: '$.Payload'
+    });
+
+    const savePdfToS3Task = new stepfunctions_tasks.LambdaInvoke(this, 'Save PDF to S3', {
+      lambdaFunction: savePdfToS3Lambda,
+      outputPath: '$.Payload'
+    });
+
+    // Create Step Functions State Machine
+    const definition = new stepfunctions.Choice(this, 'Check Subject')
+      .when(stepfunctions.Condition.booleanEquals('$.subjectContainsAccountAssignment', true), updateAccountAssignmentTask)
+      .otherwise(
+        detectInvoiceTask
+          .next(new stepfunctions.Choice(this, 'Process Attachment')
+            .when(stepfunctions.Condition.stringEquals('$.attachmentType', 'excel'), 
+              processExcelAttachmentTask.next(savePdfToS3Task))
+            .when(stepfunctions.Condition.stringEquals('$.attachmentType', 'doc'),
+              processDocAttachmentTask.next(savePdfToS3Task))
+            .when(stepfunctions.Condition.stringEquals('$.attachmentType', 'text'),
+              processEmailBodyTask.next(savePdfToS3Task))
+            .when(stepfunctions.Condition.stringEquals('$.attachmentType', 'pdf'),
+              processPDFAttachmentTask.next(savePdfToS3Task))
+        )
+      );
 
     const stateMachine = new stepfunctions.StateMachine(this, 'EmailProcessingSatetMachine', {
       definition,
       timeout: cdk.Duration.minutes(5),
     });
 
-    // Grant processIncomingEmail Lambda permission to start the Step Function Execution and read from S3 bucket
+    // Grant permissions
     stateMachine.grantStartExecution(processIncomingEmailLambda);
     incomingEmailBucket.grantRead(processIncomingEmailLambda);
-    incomingEmailBucket.grantReadWrite(detectInvoiceLambda)
+    incomingEmailBucket.grantReadWrite(updateAccountAssignmentLambda);
+    incomingEmailBucket.grantReadWrite(detectInvoiceLambda);
+    incomingEmailBucket.grantReadWrite(processPDFAttachmentLambda);
+    incomingEmailBucket.grantReadWrite(processExcelAttachmentLambda);
+    incomingEmailBucket.grantReadWrite(processDocAttachmentLambda);
+    incomingEmailBucket.grantReadWrite(processEmailBodyLambda);
+    incomingEmailBucket.grantReadWrite(savePdfToS3Lambda);
 
-    // Set environment variables for the processIncomingEmail Lambda function
+    // Set environment variables
     processIncomingEmailLambda.addEnvironment('STATE_MACHINE_ARN', stateMachine.stateMachineArn);
     processIncomingEmailLambda.addEnvironment('BUCKET_NAME', incomingEmailBucket.bucketName);
     updateAccountAssignmentLambda.addEnvironment('BUCKET_NAME', incomingEmailBucket.bucketName);
     detectInvoiceLambda.addEnvironment('BUCKET_NAME', incomingEmailBucket.bucketName);
+    processPDFAttachmentLambda.addEnvironment('BUCKET_NAME', incomingEmailBucket.bucketName);
+    processExcelAttachmentLambda.addEnvironment('BUCKET_NAME', incomingEmailBucket.bucketName);
+    processDocAttachmentLambda.addEnvironment('BUCKET_NAME', incomingEmailBucket.bucketName);
+    processEmailBodyLambda.addEnvironment('BUCKET_NAME', incomingEmailBucket.bucketName);
+    savePdfToS3Lambda.addEnvironment('BUCKET_NAME', incomingEmailBucket.bucketName);
 
     // Create SES Rule Set
     const sesRuleSet = new ses.ReceiptRuleSet(this, 'twc-email-rule-set', {

@@ -6,13 +6,13 @@ import email
 s3 = boto3.client('s3')
 
 def handler(event, context):
-    print("Executing updateAccountAssignmnet: Subject contains 'UPDATE ACCOUNT ASSIGNMENTS'")
+    print("Executing updateAccountAssignmnet: Subject contains 'UPDATED ACCOUNT ASSIGNMENTS'")
     
     # Retrieve the email from S3
     bucket_name = os.environ['BUCKET_NAME']
     message_id = event['messageId']
     
-    obj = s3.get_object(bucket_name, Key=message_id)
+    obj = s3.get_object(Bucket=bucket_name, Key=message_id)
     email_content = obj['Body'].read().decode('utf-8')
     
     # Parse the email
