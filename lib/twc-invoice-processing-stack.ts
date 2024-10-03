@@ -143,8 +143,46 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
       outputPath: '$.Payload'
     });
 
-    // Create Step Functions State Machine
+    const processAttachment = new stepfunctions.Choice(this, 'Process Attachment')
+      .when(stepfunctions.Condition.stringEquals('$.type', 'pdf'), 
+        processPDFAttachmentTask)
+      .when(stepfunctions.Condition.stringEquals('$.type', 'excel'),
+        processExcelAttachmentTask)
+      .when(stepfunctions.Condition.stringEquals('$.type', 'doc'),
+        processDocAttachmentTask)
+      .otherwise(
+        new stepfunctions.Pass(this, 'Skip Attachment', {
+          result: stepfunctions.Result.fromObject({ status: 'skipped' }),
+          resultPath: '$.processingResult',
+        })
+      );
+
+    const processAttachmentMap = new stepfunctions.Map(this, 'Process Attachments', {
+      maxConcurrency: 5, // Adjust this value based on your requirements
+      itemsPath: stepfunctions.JsonPath.stringAt('$.attachments'),
+      parameters: {
+        'type.$': '$$.Map.Item.Value.type',
+        'filename.$': '$$.Map.Item.Value.filename',
+        'messageId.$': '$.messageId',
+        'bucketName.$': '$.bucketName'
+      }
+    });
+
+    processAttachmentMap.itemProcessor(processAttachment);
+
     const definition = new stepfunctions.Choice(this, 'Check Subject')
+      .when(stepfunctions.Condition.booleanEquals('$.subjectContainsAccountAssignment', true), updateAccountAssignmentTask)
+      .otherwise(
+        detectInvoiceTask
+          .next(new stepfunctions.Choice(this, 'Check Attachments')
+            .when(stepfunctions.Condition.isPresent('$.attachments[0]'),
+              processAttachmentMap.next(savePdfToS3Task))
+            .otherwise(processEmailBodyTask.next(savePdfToS3Task))
+        )
+      );
+
+
+    /*const definition = new stepfunctions.Choice(this, 'Check Subject')
       .when(stepfunctions.Condition.booleanEquals('$.subjectContainsAccountAssignment', true), updateAccountAssignmentTask)
       .otherwise(
         detectInvoiceTask
@@ -158,7 +196,7 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
             .when(stepfunctions.Condition.stringEquals('$.attachmentType', 'pdf'),
               processPDFAttachmentTask.next(savePdfToS3Task))
         )
-      );
+      );*/
 
     const stateMachine = new stepfunctions.StateMachine(this, 'EmailProcessingSatetMachine', {
       definition,

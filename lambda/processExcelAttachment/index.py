@@ -1,6 +1,7 @@
 import boto3
 import os
 import io
+import base64
 import email
 from openpyxl import load_workbook
 from reportlab.lib import colors
@@ -10,14 +11,16 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
 s3 = boto3.client('s3')
 
 def handler(event, context):
-    print(f"Converting Excel to PDF...")
+    print(f"Processing Excel attachment...")
     bucket_name = os.environ['BUCKET_NAME']
     message_id = event['messageId']
+    attachment_filename = event['filename']
+    
+    pdf_key = f'invoices/{message_id}/{os.path.splitext(attachment_filename)[0]}.pdf'
+    excel_data = None
     
     obj = s3.get_object(Bucket=bucket_name, Key=message_id)
     email_content = obj['Body'].read().decode('utf-8')
-    
-    excel_data = None
     for part in email.message_from_string(email_content).walk():
         if part.get_content_maintype() == 'application' and part.get_filename().endswith(('.xlsx', '.xls')):
             excel_data = part.get_payload(decode=True)
@@ -56,10 +59,10 @@ def handler(event, context):
         return {
             'statusCode': 200,
             'pdfKey': pdf_key,
-            'pdfData': pdf_data
+            'pdfData': base64.b64encode(pdf_data).decode('utf-8')
         }
     else:
         return {
             'statusCode': 400,
-            'body': 'No Excel attachment found'
+            'body': f'No Excel attachment {attachment_filename} found'
         }

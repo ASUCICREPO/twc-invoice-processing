@@ -2,6 +2,7 @@ import boto3
 import os
 import io
 import email
+import base64
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
@@ -13,6 +14,7 @@ def handler(event, context):
     bucket_name = os.environ['BUCKET_NAME']
     message_id = event['messageId']
     
+    pdf_key = f'invoices/{message_id}/email_body.pdf'
     obj =  s3.get_object(Bucket=bucket_name, Key=message_id)
     email_content = obj['Body'].read().decode('utf-8')
     
@@ -35,12 +37,11 @@ def handler(event, context):
         pdf.build(elements)
         
         pdf_data = buffer.getvalue()
-        pdf_key = f'invoices/{message_id}.pdf'
         
         return {
             'statusCode': 200,
             'pdfKey': pdf_key,
-            'pdfData': pdf_data
+            'pdfData': base64.b64encode(pdf_data).decode('utf-8')
         }
     else:
         return {
