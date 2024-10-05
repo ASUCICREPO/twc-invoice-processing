@@ -2,7 +2,6 @@ import boto3
 import os
 import io
 import email
-import base64
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
@@ -40,12 +39,11 @@ def handler(event, context):
         
         try:
             print(f"Saving PDF to bucket [{bucket_name}], at location [{pdf_key}]...")
-            pdf_binary = pdf_data.encode('utf-8')
             
             s3.put_object(
                 Bucket=bucket_name,
                 Key=pdf_key,
-                Body=pdf_binary,
+                Body=pdf_data,
                 ContentType='application/pdf'
             )
             print(f"Successfully saved PDF to bucket [{bucket_name}], at location [{pdf_key}]!")
