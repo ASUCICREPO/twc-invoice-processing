@@ -5,6 +5,7 @@ import * as sesActions from 'aws-cdk-lib/aws-ses-actions';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
 import * as stepfunctions_tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 
 interface TwcInvoiceProcessingStackProps extends cdk.StackProps {
@@ -15,8 +16,15 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: TwcInvoiceProcessingStackProps) {
     super(scope, id, props);
 
-    // Create the S3 bucket to store the incoming emails
+    // Create the S3 buckets
     const incomingEmailBucket = new s3.Bucket(this, 'twc-incoming-email-bucket', {
+      autoDeleteObjects: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      versioned: true,
+      encryption: s3.BucketEncryption.S3_MANAGED
+    });
+
+    const csvOutputBucket = new s3.Bucket(this, 'twc-csv-output-bucket', {
       autoDeleteObjects: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       versioned: true,
@@ -45,7 +53,9 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
     const processPDFAttachmentLambda = new lambda.Function(this, 'processPDFAttachment', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/processPDFAttachment')
+      code: lambda.Code.fromAsset('lambda/processPDFAttachment'),
+      timeout: cdk.Duration.seconds(60),
+      memorySize: 256
     });
 
     const processExcelAttachmentLambda = new lambda.Function(this, 'processExcelAttachment', {
@@ -107,6 +117,38 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
       code: lambda.Code.fromAsset('lambda/savePdfToS3')
     });
 
+    const textractAnalysisLambda = new lambda.Function(this, 'textractAnalysis', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset('lambda/textractAnalysis',
+        {
+          bundling: {
+            image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+            command: [
+              'bash', '-c',
+              'pip install -r requirements.txt -t /asset-output && cp index.py /asset-output'
+            ],
+          },
+        }),
+      timeout: cdk.Duration.seconds(300),
+      memorySize: 1024,
+      environment: {
+        INPUT_BUCKET_NAME: incomingEmailBucket.bucketName,
+        OUTPUT_BUCKET_NAME: csvOutputBucket.bucketName,
+        TIMEZONE: 'America/Chicago'  // TODO: make env var
+      }
+    });
+
+    // Grant Textract permissions to the Lambda
+    textractAnalysisLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['textract:AnalyzeExpense'],
+      resources: ['*']
+    }));
+
+    // Grant S3 read/write permissions to the Lambda
+    incomingEmailBucket.grantRead(textractAnalysisLambda);
+    csvOutputBucket.grantReadWrite(textractAnalysisLambda);
+
     // Create Step Functions tasks
     const updateAccountAssignmentTask = new stepfunctions_tasks.LambdaInvoke(this,'Update Account Assignment', {
       lambdaFunction: updateAccountAssignmentLambda,
@@ -138,8 +180,13 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
       outputPath: '$.Payload'
     });
 
-    const savePdfToS3Task = new stepfunctions_tasks.LambdaInvoke(this, 'Save PDF to S3', {
+    /*const savePdfToS3Task = new stepfunctions_tasks.LambdaInvoke(this, 'Save PDF to S3', {
       lambdaFunction: savePdfToS3Lambda,
+      outputPath: '$.Payload'
+    });*/
+
+    const textractAnalysisTask = new stepfunctions_tasks.LambdaInvoke(this, 'Analyze with Textract', {
+      lambdaFunction: textractAnalysisLambda,
       outputPath: '$.Payload'
     });
 
@@ -150,12 +197,7 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
         processExcelAttachmentTask)
       .when(stepfunctions.Condition.stringEquals('$.type', 'doc'),
         processDocAttachmentTask)
-      .otherwise(
-        new stepfunctions.Pass(this, 'Skip Attachment', {
-          result: stepfunctions.Result.fromObject({ status: 'skipped' }),
-          resultPath: '$.processingResult',
-        })
-      );
+      .otherwise(processEmailBodyTask);
 
     const processAttachmentMap = new stepfunctions.Map(this, 'Process Attachments', {
       maxConcurrency: 5, // Adjust this value based on your requirements
@@ -176,27 +218,11 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
         detectInvoiceTask
           .next(new stepfunctions.Choice(this, 'Check Attachments')
             .when(stepfunctions.Condition.isPresent('$.attachments[0]'),
-              processAttachmentMap.next(savePdfToS3Task))
-            .otherwise(processEmailBodyTask.next(savePdfToS3Task))
-        )
+              processAttachmentMap
+                .next(textractAnalysisTask)
+            )
+          )
       );
-
-
-    /*const definition = new stepfunctions.Choice(this, 'Check Subject')
-      .when(stepfunctions.Condition.booleanEquals('$.subjectContainsAccountAssignment', true), updateAccountAssignmentTask)
-      .otherwise(
-        detectInvoiceTask
-          .next(new stepfunctions.Choice(this, 'Process Attachment')
-            .when(stepfunctions.Condition.stringEquals('$.attachmentType', 'excel'), 
-              processExcelAttachmentTask.next(savePdfToS3Task))
-            .when(stepfunctions.Condition.stringEquals('$.attachmentType', 'doc'),
-              processDocAttachmentTask.next(savePdfToS3Task))
-            .when(stepfunctions.Condition.stringEquals('$.attachmentType', 'text'),
-              processEmailBodyTask.next(savePdfToS3Task))
-            .when(stepfunctions.Condition.stringEquals('$.attachmentType', 'pdf'),
-              processPDFAttachmentTask.next(savePdfToS3Task))
-        )
-      );*/
 
     const stateMachine = new stepfunctions.StateMachine(this, 'EmailProcessingSatetMachine', {
       definition,

@@ -23,13 +23,33 @@ def handler(event, context):
             break
     
     if pdf_data:
-        return {
-            'statusCode': 200,
-            'pdfKey': pdf_key,
-            'pdfData': base64.b64encode(pdf_data).decode('utf-8')
-        }
+        try:
+            print(f"Saving PDF to bucket [{bucket_name}], at location [{pdf_key}]...")
+            
+            s3.put_object(
+                Bucket=bucket_name,
+                Key=pdf_key,
+                Body=pdf_data,
+                ContentType='application/pdf'
+            )
+            print(f"Successfully saved PDF to bucket [{bucket_name}], at location [{pdf_key}]!")
+            result = {
+                'statusCode': 200,
+                'status': 'success',
+                'pdfKey': pdf_key
+            }
+        except Exception as e:
+            print(f"Error saving PDF: {str(e)}")
+            result = {
+                'statusCode': 400,
+                'status': 'error',
+                'error': str(e),
+                'pdfKey': pdf_key
+            }
+        return result
     else:
         return {
-            'statusCode': 400,
+            'statusCode': 404,
+            'status': 'error',
             'body': f'PDF attachment {attachment_filename} not found'
         }

@@ -32,6 +32,8 @@ def handler(event, context):
                 elif filename.endswith('.docx') or filename.endswith('.doc'):
                     print(f"Found an Word Document attachment with name [{filename}]!")
                     attachments.append({'type': 'doc', 'filename': filename})
+    if attachments == []:
+        attachments.append({'type': 'body', filename: 'body'})
     return {
         'statusCode': 200,
         'messageId': message_id,
