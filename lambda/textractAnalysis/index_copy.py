@@ -33,35 +33,53 @@ def get_next_business_day(date):
     return date
 
 def extract_email_datetime(message_id, input_bucket):
+    print(f"Fetching email with Message ID: [{message_id}] from S3 bucket with name: [{input_bucket}]")
     obj = s3_client.get_object(Bucket=input_bucket, Key=message_id)
     email_content = obj['Body'].read().decode('utf-8')
     email_message = parser.Parser().parsestr(email_content)
     date_str = email_message['Date']
     email_datetime = parsedate_to_datetime(date_str)
     
-    # Convert to specified timezone
+    print(f"Converting date-time to timezone: [{TIMEZONE}]")
     local_tz = pytz.timezone(TIMEZONE)
     local_datetime = email_datetime.astimezone(local_tz)
     
     return local_datetime
 
 def analyze_pdf_with_textract(pdf_key, input_bucket):
-    # Get the PDF from S3
-    pdf_object = s3_client.get_object(Bucket=input_bucket, Key=pdf_key)
-    pdf_bytes = pdf_object['Body'].read()
-    
-    # Send to Textract
-    response = textract_client.analyze_expense(
-        Document={'Bytes': pdf_bytes}
-    )
+    response = ""
+    print(f"Sending PDF with Key [{pdf_key}] to Amazon Textract...")
+    try:
+        response = textract_client.start_expense_analysis(
+            Document={
+                'S3Object': {
+                    'Bucket': input_bucket,
+                    'Name': pdf_key
+                }
+            }
+        )
+    except textract_client.exceptions.UnsupportedDocumentException:
+        print("PDF format not supported directly. Attempting alternative approaches...")
+        try:
+            # Option 2: Download and try with raw bytes
+            print(f"Fetching the PDF with Key [{pdf_key}] from S3 bucket with name [{input_bucket}]")
+            pdf_object = s3_client.get_object(Bucket=input_bucket, Key=pdf_key)
+            pdf_bytes = pdf_object['Body'].read()
+            
+            response = textract_client.analyze_expense(
+                Document={'Bytes': pdf_bytes}
+            )
+        except Exception as e:
+            print(f"Failed to process PDF after multiple attempts: {str(e)}")
+            raise Exception(f"Unable to process PDF. Please ensure the PDF is in a format supported by Textract: {str(e)}")
     
     # Extract required fields
     invoice_number = ""
     vendor_name = ""
     amount = 0.0
     
-    # Parse Textract response to get required fields
-    # This is simplified - you'll need to implement proper parsing
+    print("Parsing Textract response to get required fields...")
+    # TODO: This is simplified - you'll need to implement proper parsing
     for expense_doc in response['ExpenseDocuments']:
         for field in expense_doc['SummaryFields']:
             if field['Type']['Text'] == 'INVOICE_RECEIPT_ID':
@@ -77,36 +95,37 @@ def get_or_create_csv(date, output_bucket):
     csv_filename = f"{date.strftime('%Y-%m-%d')}_invoices.csv"
     
     try:
-        # Try to get existing CSV
+        print(f"Try to get existing CSV with name [{csv_filename}] from S3 bucket [{output_bucket}]")
         csv_obj = s3_client.get_object(Bucket=output_bucket, Key=csv_filename)
         csv_content = csv_obj['Body'].read().decode('utf-8')
         existing_rows = list(csv.reader(io.StringIO(csv_content)))
     except s3_client.exceptions.NoSuchKey:
-        # Create new CSV if it doesn't exist
+        print(f"CSV with name [{csv_filename}] does not exist S3 bucket [{output_bucket}]. Creating new CSV file...")
         existing_rows = [['Date', 'Time', 'Invoice Number', 'Vendor Name', 'Amount']]
     
     return csv_filename, existing_rows
 
-def handler(event, context):
-    # print(f"Input type: {type(event)}")
-    # records = json.dumps(event)
-    
+def handler(event, context):    
     for record in event:
         if record['statusCode'] != 200:
             continue
         
         message_id = record['pdfKey'].split('/')[1]
         pdf_key = record['pdfKey']
+        print(f"Processing invoice from email with Message ID: [{message_id}] with PDF Key: [{pdf_key}]")
         
         # Get email datetime
+        print(f"Extracting email date and time from email with Message ID [{message_id}]...")
         email_datetime = extract_email_datetime(message_id, INPUT_BUCKET)
         
-        # Determine which day's CSV this should go into
+        print(f"Determining which day's CSV this should go into...")
         target_date = get_next_business_day(email_datetime)
+        print(f"Computed business day for the invoice is [{target_date}]")
         
-        # Extract information from PDF
+        print("Extracting information from PDF using Textract...")
         invoice_number, vendor_name, amount = analyze_pdf_with_textract(pdf_key, INPUT_BUCKET)
         
+        print("Saving Textract output to CSV...")
         # Get or create appropriate CSV
         csv_filename, existing_rows = get_or_create_csv(target_date, OUTPUT_BUCKET)
         
@@ -125,11 +144,13 @@ def handler(event, context):
         csv_writer = csv.writer(output)
         csv_writer.writerows(existing_rows)
         
+        print(f"Saving updated CSV file with name [{csv_filename}] to S3 Bucket [{OUTPUT_BUCKET}]")
         s3_client.put_object(
             Bucket=OUTPUT_BUCKET,
             Key=csv_filename,
             Body=output.getvalue()
         )
+        print(f"Successfully processed invoice with PDF Key [{pdf_key}] and saved it to CSV with name [{csv_filename}]")
     
     return {
         'statusCode': 200,
