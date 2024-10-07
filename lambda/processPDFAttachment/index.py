@@ -1,5 +1,4 @@
 import os
-import base64
 import boto3
 import email
 

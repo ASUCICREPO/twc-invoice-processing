@@ -117,6 +117,44 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
       code: lambda.Code.fromAsset('lambda/savePdfToS3')
     });
 
+    const startTextractJobLambda = new lambda.Function(this, 'startTextractJob', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'startTextractJob.handler',
+      code: lambda.Code.fromAsset('lambda/textractAnalysis'),
+      environment: {
+        INPUT_BUCKET_NAME: incomingEmailBucket.bucketName,
+      }
+    });
+
+    const getTextractResultsLambda = new lambda.Function(this, 'getTextractResults', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'getTextractResults.handler',
+      code: lambda.Code.fromAsset('lambda/textractAnalysis'),
+    });
+    
+    const processTextractResultsLambda = new lambda.Function(this, 'processTextractResults', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset('lambda/processTextractResults',
+        {
+          bundling: {
+            image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+            command: [
+              'bash', '-c',
+              'pip install -r requirements.txt -t /asset-output && cp index.py /asset-output'
+            ],
+          },
+        }),
+      timeout: cdk.Duration.seconds(300),
+      memorySize: 1024,
+      environment: {
+        INPUT_BUCKET_NAME: incomingEmailBucket.bucketName,
+        OUTPUT_BUCKET_NAME: csvOutputBucket.bucketName,
+        TIMEZONE: 'America/Chicago'  // TODO: make env var
+      }
+    });
+
+    /*
     const textractAnalysisLambda = new lambda.Function(this, 'textractAnalysis', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
@@ -138,16 +176,22 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
         TIMEZONE: 'America/Chicago'  // TODO: make env var
       }
     });
+    */
 
     // Grant Textract permissions to the Lambda
-    textractAnalysisLambda.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['textract:AnalyzeExpense'],
+    startTextractJobLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['textract:StartExpenseAnalysis'],
+      resources: ['*']
+    }));
+    getTextractResultsLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['textract:GetExpenseAnalysis'],
       resources: ['*']
     }));
 
     // Grant S3 read/write permissions to the Lambda
-    incomingEmailBucket.grantRead(textractAnalysisLambda);
-    csvOutputBucket.grantReadWrite(textractAnalysisLambda);
+    incomingEmailBucket.grantRead(startTextractJobLambda);
+    incomingEmailBucket.grantRead(processTextractResultsLambda);
+    csvOutputBucket.grantReadWrite(processTextractResultsLambda);
 
     // Create Step Functions tasks
     const updateAccountAssignmentTask = new stepfunctions_tasks.LambdaInvoke(this,'Update Account Assignment', {
@@ -183,12 +227,50 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
     /*const savePdfToS3Task = new stepfunctions_tasks.LambdaInvoke(this, 'Save PDF to S3', {
       lambdaFunction: savePdfToS3Lambda,
       outputPath: '$.Payload'
-    });*/
+    });
 
     const textractAnalysisTask = new stepfunctions_tasks.LambdaInvoke(this, 'Analyze with Textract', {
       lambdaFunction: textractAnalysisLambda,
       outputPath: '$.Payload'
+    });*/
+
+    const startTextractJobTask = new stepfunctions_tasks.LambdaInvoke(this, 'Start Textract Jobs', {
+      lambdaFunction: startTextractJobLambda,
+      outputPath: '$.Payload',
     });
+    
+    const getTextractResultsTask = new stepfunctions_tasks.LambdaInvoke(this, 'Get Textract Results', {
+      lambdaFunction: getTextractResultsLambda,
+      outputPath: '$.Payload',
+    });
+    
+    const processTextractResultsTask = new stepfunctions_tasks.LambdaInvoke(this, 'Process Textract Results', {
+      lambdaFunction: processTextractResultsLambda,
+      outputPath: '$.Payload',
+    });
+
+    // Create Step function States
+    const wait30Seconds = new stepfunctions.Wait(this, 'Wait 30 Seconds', {
+      time: stepfunctions.WaitTime.duration(cdk.Duration.seconds(30)),
+    });
+
+    const asyncTextractProcessing = 
+      startTextractJobTask
+        .next(wait30Seconds)
+        .next(getTextractResultsTask)
+        .next(
+          new stepfunctions.Choice(this, 'Job Complete?')
+            .when(stepfunctions.Condition.stringEquals('$.jobStatus', 'SUCCEEDED'), 
+              processTextractResultsTask)
+            .when(stepfunctions.Condition.stringEquals('$.jobStatus', 'IN_PROGRESS'), 
+              wait30Seconds)
+            .otherwise(
+              new stepfunctions.Fail(this, 'Textract Job Failed', {
+                cause: 'Textract job failed or timed out',
+                error: 'TextractJobError',
+              })
+            )
+        );
 
     const processAttachment = new stepfunctions.Choice(this, 'Process Attachment')
       .when(stepfunctions.Condition.stringEquals('$.type', 'pdf'), 
@@ -219,14 +301,14 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
           .next(new stepfunctions.Choice(this, 'Check Attachments')
             .when(stepfunctions.Condition.isPresent('$.attachments[0]'),
               processAttachmentMap
-                .next(textractAnalysisTask)
+                .next(asyncTextractProcessing)
             )
           )
       );
 
     const stateMachine = new stepfunctions.StateMachine(this, 'EmailProcessingSatetMachine', {
       definition,
-      timeout: cdk.Duration.minutes(5),
+      timeout: cdk.Duration.minutes(15),
     });
 
     // Grant permissions
