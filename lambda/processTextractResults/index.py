@@ -52,7 +52,18 @@ def handler(event, context):
         textract_jobs = event['textractJobs']
         
         for job in textract_jobs:
-            if job['jobStatus'] != 'SUCCEEDED' or 'results' not in job:
+            if job['jobStatus'] != 'SUCCEEDED' or 'resultsKey' not in job:
+                continue
+            
+            # Get Textract results from S3
+            try:
+                results_obj = s3_client.get_object(
+                    Bucket=os.environ['OUTPUT_BUCKET_NAME'],
+                    Key=job['resultsKey']
+                )
+                results = json.loads(results_obj['Body'].read().decode('utf-8'))
+            except Exception as e:
+                print(f"Error reading Textract results from S3: {str(e)}")
                 continue
             
             # Extract message ID from PDF key
@@ -63,7 +74,7 @@ def handler(event, context):
             vendor_name = ""
             amount = 0.0
             
-            for expense_doc in job['results'].get('ExpenseDocuments', []):
+            for expense_doc in results.get('ExpenseDocuments', []):
                 for field in expense_doc.get('SummaryFields', []):
                     field_type = field.get('Type', {}).get('Text', '')
                     field_value = field.get('ValueDetection', {}).get('Text', '')
@@ -73,11 +84,7 @@ def handler(event, context):
                     elif field_type == 'VENDOR_NAME':
                         vendor_name = field_value
                     elif field_type == 'TOTAL':
-                        try:
-                            amount = float(field_value.replace('$', '').replace(',', ''))
-                        except ValueError:
-                            print(f"Could not convert amount '{field_value}' to float")
-                            amount = field_value
+                        amount = field_value
             
             # Get email datetime and determine target date
             email_datetime = extract_email_datetime(message_id)
@@ -92,7 +99,7 @@ def handler(event, context):
                 email_datetime.strftime('%H:%M:%S'),
                 invoice_number,
                 vendor_name,
-                str(amount)
+                amount
             ]
             existing_rows.append(new_row)
             
