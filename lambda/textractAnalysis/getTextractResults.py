@@ -1,7 +1,9 @@
 import json
 import boto3
+import os
 
 textract_client = boto3.client('textract')
+s3_client = boto3.client('s3')
 
 def handler(event, context):
     print(f"Received event: {json.dumps(event)}")
@@ -19,7 +21,14 @@ def handler(event, context):
                 
                 job['jobStatus'] = response['JobStatus']
                 if response['JobStatus'] == 'SUCCEEDED':
-                    job['results'] = response
+                    results_key = f"textract-results/{job['jobId']}.json"
+                    s3_client.put_object(
+                        Bucket=os.environ['OUTPUT_BUCKET_NAME'],
+                        Key=results_key,
+                        Body=json.dumps(response),
+                        ContentType='application/json'
+                    )
+                    job['resultsKey'] = results_key
                 elif response['JobStatus'] == 'IN_PROGRESS':
                     all_jobs_completed = False
                 elif response['JobStatus'] == 'FAILED':
