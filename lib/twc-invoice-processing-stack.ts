@@ -17,14 +17,21 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
     super(scope, id, props);
 
     // Create the S3 buckets
-    const inputBucket = new s3.Bucket(this, 'twc-input-bucket', {
+    const incomingEmailBucket = new s3.Bucket(this, 'twc-incoming-email-bucket', {
       autoDeleteObjects: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       versioned: true,
       encryption: s3.BucketEncryption.S3_MANAGED
     });
 
-    const outputBucket = new s3.Bucket(this, 'twc-output-bucket', {
+    const artefactBucket = new s3.Bucket(this, 'twc-artefact-bucket', {
+      autoDeleteObjects: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      versioned: true,
+      encryption: s3.BucketEncryption.S3_MANAGED
+    });
+  
+    const resultBucket = new s3.Bucket(this, 'twc-result-bucket', {
       autoDeleteObjects: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       versioned: true,
@@ -35,28 +42,48 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
     const processIncomingEmailLambda = new lambda.Function(this, 'processIncomingEmail', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/processIncomingEmail')
+      code: lambda.Code.fromAsset('lambda/processIncomingEmail'),
+      environment: {
+        BUCKET_NAME: incomingEmailBucket.bucketName
+      },
     });
+    incomingEmailBucket.grantRead(processIncomingEmailLambda);
 
     const updateAccountAssignmentLambda = new lambda.Function(this, 'updateAccountAssignment', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/updateAccountAssignment')
+      code: lambda.Code.fromAsset('lambda/updateAccountAssignment'),
+      environment: {
+        EMAIL_BUCKET_NAME: incomingEmailBucket.bucketName,
+        ARTEFACT_BUCKET_NAME: artefactBucket.bucketName
+      },
     });
+    incomingEmailBucket.grantRead(updateAccountAssignmentLambda);
+    artefactBucket.grantWrite(updateAccountAssignmentLambda);
 
     const detectInvoiceLambda = new lambda.Function(this, 'detectInvoice', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
       code: lambda.Code.fromAsset('lambda/detectInvoice'),
+      environment: {
+        EMAIL_BUCKET_NAME: incomingEmailBucket.bucketName,
+      }
     });
+    incomingEmailBucket.grantReadWrite(detectInvoiceLambda);
 
     const processPDFAttachmentLambda = new lambda.Function(this, 'processPDFAttachment', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
       code: lambda.Code.fromAsset('lambda/processPDFAttachment'),
+      environment: {
+        EMAIL_BUCKET_NAME: incomingEmailBucket.bucketName,
+        ARTEFACT_BUCKET_NAME: artefactBucket.bucketName
+      },
       timeout: cdk.Duration.seconds(60),
       memorySize: 256
     });
+    incomingEmailBucket.grantRead(processPDFAttachmentLambda);
+    artefactBucket.grantWrite(processPDFAttachmentLambda);
 
     const processExcelAttachmentLambda = new lambda.Function(this, 'processExcelAttachment', {
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -72,9 +99,15 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
           },
         }
       ),    
+      environment: {
+        EMAIL_BUCKET_NAME: incomingEmailBucket.bucketName,
+        ARTEFACT_BUCKET_NAME: artefactBucket.bucketName
+      },
       timeout: cdk.Duration.seconds(60),
       memorySize: 256
     });
+    incomingEmailBucket.grantRead(processExcelAttachmentLambda);
+    artefactBucket.grantWrite(processExcelAttachmentLambda);
 
     const processDocAttachmentLambda = new lambda.Function(this, 'processDocAttachment', {
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -90,9 +123,15 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
           },
         }
       ),    
+      environment: {
+        EMAIL_BUCKET_NAME: incomingEmailBucket.bucketName,
+        ARTEFACT_BUCKET_NAME: artefactBucket.bucketName
+      },
       timeout: cdk.Duration.seconds(60),
       memorySize: 256
     });
+    incomingEmailBucket.grantRead(processDocAttachmentLambda);
+    artefactBucket.grantWrite(processDocAttachmentLambda);
 
     const processEmailBodyLambda = new lambda.Function(this, 'processEmailBody', {
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -106,28 +145,44 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
               'pip install -r requirements.txt -t /asset-output && cp index.py /asset-output'
             ],
           },
-        }),    
+        }),   
+        environment: {
+          EMAIL_BUCKET_NAME: incomingEmailBucket.bucketName,
+          ARTEFACT_BUCKET_NAME: artefactBucket.bucketName
+        }, 
         timeout: cdk.Duration.seconds(60),
         memorySize: 256
     });
+    incomingEmailBucket.grantRead(processEmailBodyLambda);
+    artefactBucket.grantWrite(processEmailBodyLambda);
 
     const startTextractJobLambda = new lambda.Function(this, 'startTextractJob', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'startTextractJob.handler',
       code: lambda.Code.fromAsset('lambda/textractAnalysis'),
       environment: {
-        INPUT_BUCKET_NAME: inputBucket.bucketName,
+        ARTEFACT_BUCKET_NAME: artefactBucket.bucketName,
       },
     });
+    startTextractJobLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['textract:StartExpenseAnalysis'],
+      resources: ['*']
+    }));
+    artefactBucket.grantRead(startTextractJobLambda);
 
     const getTextractResultsLambda = new lambda.Function(this, 'getTextractResults', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'getTextractResults.handler',
       code: lambda.Code.fromAsset('lambda/textractAnalysis'),
       environment: {
-        OUTPUT_BUCKET_NAME: outputBucket.bucketName,
+        ARTEFACT_BUCKET_NAME: artefactBucket.bucketName,
       },
     });
+    artefactBucket.grantWrite(getTextractResultsLambda);
+    getTextractResultsLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['textract:GetExpenseAnalysis'],
+      resources: ['*']
+    }));
     
     const processTextractResultsLambda = new lambda.Function(this, 'processTextractResults', {
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -145,27 +200,19 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(300),
       memorySize: 1024,
       environment: {
-        INPUT_BUCKET_NAME: inputBucket.bucketName,
-        OUTPUT_BUCKET_NAME: outputBucket.bucketName,
+        INPUT_BUCKET_NAME: incomingEmailBucket.bucketName,
+        ARTEFACT_BUCKET_NAME: artefactBucket.bucketName,
+        RESULT_BUCKET_NAME: resultBucket.bucketName, 
         TIMEZONE: 'America/Chicago'  // TODO: make env var
       },
     });
-
-    // Grant Textract permissions to the Lambda
-    startTextractJobLambda.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['textract:StartExpenseAnalysis'],
+    incomingEmailBucket.grantRead(processTextractResultsLambda);
+    artefactBucket.grantRead(processTextractResultsLambda)
+    resultBucket.grantReadWrite(processTextractResultsLambda);
+    processTextractResultsLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['bedrock:InvokeModel'],
       resources: ['*']
     }));
-    getTextractResultsLambda.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['textract:GetExpenseAnalysis'],
-      resources: ['*']
-    }));
-
-    // Grant S3 read/write permissions to the Lambda
-    inputBucket.grantRead(startTextractJobLambda);
-    outputBucket.grantWrite(getTextractResultsLambda);
-    inputBucket.grantRead(processTextractResultsLambda);
-    outputBucket.grantReadWrite(processTextractResultsLambda);
 
     // Create Step Functions tasks
     const updateAccountAssignmentTask = new stepfunctions_tasks.LambdaInvoke(this,'Update Account Assignment', {
@@ -274,27 +321,9 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
       definition,
       timeout: cdk.Duration.minutes(15),
     });
-
-    // Grant permissions
-    stateMachine.grantStartExecution(processIncomingEmailLambda);
-    inputBucket.grantRead(processIncomingEmailLambda);
-    inputBucket.grantReadWrite(updateAccountAssignmentLambda);
-    inputBucket.grantReadWrite(detectInvoiceLambda);
-    inputBucket.grantReadWrite(processPDFAttachmentLambda);
-    inputBucket.grantReadWrite(processExcelAttachmentLambda);
-    inputBucket.grantReadWrite(processDocAttachmentLambda);
-    inputBucket.grantReadWrite(processEmailBodyLambda);
-
-    // Set environment variables
     processIncomingEmailLambda.addEnvironment('STATE_MACHINE_ARN', stateMachine.stateMachineArn);
-    processIncomingEmailLambda.addEnvironment('BUCKET_NAME', inputBucket.bucketName);
-    updateAccountAssignmentLambda.addEnvironment('BUCKET_NAME', inputBucket.bucketName);
-    detectInvoiceLambda.addEnvironment('BUCKET_NAME', inputBucket.bucketName);
-    processPDFAttachmentLambda.addEnvironment('BUCKET_NAME', inputBucket.bucketName);
-    processExcelAttachmentLambda.addEnvironment('BUCKET_NAME', inputBucket.bucketName);
-    processDocAttachmentLambda.addEnvironment('BUCKET_NAME', inputBucket.bucketName);
-    processEmailBodyLambda.addEnvironment('BUCKET_NAME', inputBucket.bucketName);
-
+    stateMachine.grantStartExecution(processIncomingEmailLambda);
+    
     // Create SES Rule Set
     const sesRuleSet = new ses.ReceiptRuleSet(this, 'twc-email-rule-set', {
       receiptRuleSetName: 'twc-email-processing-rule-set',
@@ -306,7 +335,7 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
       scanEnabled: true,
       tlsPolicy: ses.TlsPolicy.REQUIRE,
       actions: [
-        new sesActions.S3({ bucket: inputBucket }),
+        new sesActions.S3({ bucket: incomingEmailBucket }),
         new sesActions.Lambda({ function: processIncomingEmailLambda })
       ]
     });

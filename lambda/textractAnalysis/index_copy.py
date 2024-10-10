@@ -14,7 +14,7 @@ textract_client = boto3.client('textract')
 
 # Get environment variables
 INPUT_BUCKET = os.environ['INPUT_BUCKET_NAME']
-OUTPUT_BUCKET = os.environ['OUTPUT_BUCKET_NAME']
+ARTEFACT_BUCKET = os.environ['ARTEFACT_BUCKET_NAME']
 TIMEZONE = os.environ['TIMEZONE']
 
 def get_next_business_day(date):
@@ -91,16 +91,16 @@ def analyze_pdf_with_textract(pdf_key, input_bucket):
     
     return invoice_number, vendor_name, amount
 
-def get_or_create_csv(date, output_bucket):
+def get_or_create_csv(date, result_bucket):
     csv_filename = f"{date.strftime('%Y-%m-%d')}_invoices.csv"
     
     try:
-        print(f"Try to get existing CSV with name [{csv_filename}] from S3 bucket [{output_bucket}]")
-        csv_obj = s3_client.get_object(Bucket=output_bucket, Key=csv_filename)
+        print(f"Try to get existing CSV with name [{csv_filename}] from S3 bucket [{result_bucket}]")
+        csv_obj = s3_client.get_object(Bucket=result_bucket, Key=csv_filename)
         csv_content = csv_obj['Body'].read().decode('utf-8')
         existing_rows = list(csv.reader(io.StringIO(csv_content)))
     except s3_client.exceptions.NoSuchKey:
-        print(f"CSV with name [{csv_filename}] does not exist S3 bucket [{output_bucket}]. Creating new CSV file...")
+        print(f"CSV with name [{csv_filename}] does not exist S3 bucket [{result_bucket}]. Creating new CSV file...")
         existing_rows = [['Date', 'Time', 'Invoice Number', 'Vendor Name', 'Amount']]
     
     return csv_filename, existing_rows
@@ -127,7 +127,7 @@ def handler(event, context):
         
         print("Saving Textract output to CSV...")
         # Get or create appropriate CSV
-        csv_filename, existing_rows = get_or_create_csv(target_date, OUTPUT_BUCKET)
+        csv_filename, existing_rows = get_or_create_csv(target_date, ARTEFACT_BUCKET)
         
         # Add new row
         new_row = [
@@ -144,9 +144,9 @@ def handler(event, context):
         csv_writer = csv.writer(output)
         csv_writer.writerows(existing_rows)
         
-        print(f"Saving updated CSV file with name [{csv_filename}] to S3 Bucket [{OUTPUT_BUCKET}]")
+        print(f"Saving updated CSV file with name [{csv_filename}] to S3 Bucket [{ARTEFACT_BUCKET}]")
         s3_client.put_object(
-            Bucket=OUTPUT_BUCKET,
+            Bucket=ARTEFACT_BUCKET,
             Key=csv_filename,
             Body=output.getvalue()
         )

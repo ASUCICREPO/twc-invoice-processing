@@ -7,7 +7,7 @@ s3_client = boto3.client('s3')
 
 def handler(event, context):
     print(f"Received event: {json.dumps(event)}")
-    
+    artefact_bucket_name = os.environ['ARTEFACT_BUCKET_NAME']
     try:
         textract_jobs = event['textractJobs']
         all_jobs_completed = True
@@ -23,7 +23,7 @@ def handler(event, context):
                 if response['JobStatus'] == 'SUCCEEDED':
                     results_key = f"textract-results/{job['jobId']}.json"
                     s3_client.put_object(
-                        Bucket=os.environ['OUTPUT_BUCKET_NAME'],
+                        Bucket=artefact_bucket_name,
                         Key=results_key,
                         Body=json.dumps(response),
                         ContentType='application/json'

@@ -7,6 +7,7 @@ textract_client = boto3.client('textract')
 
 def handler(event, context):
     print(f"Received event: {json.dumps(event)}")
+    artefact_bucket_name = os.environ['ARTEFACT_BUCKET_NAME']
     
     try:
         # Start a Textract job for each PDF in the processed attachments
@@ -19,7 +20,7 @@ def handler(event, context):
                 response = textract_client.start_expense_analysis(
                     DocumentLocation={
                         'S3Object': {
-                            'Bucket': os.environ['INPUT_BUCKET_NAME'],
+                            'Bucket': artefact_bucket_name,
                             'Name': item['pdfKey']
                         }
                     }

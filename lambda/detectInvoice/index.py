@@ -7,11 +7,11 @@ s3 = boto3.client('s3')
 def handler(event, context):
     print("Executing detectInvoice: Subject does NOT contain 'UPDATED ACCOUNT ASSIGNMENTS'")
     
-    bucket_name = os.environ['BUCKET_NAME']
+    email_bucket_name = os.environ['EMAIL_BUCKET_NAME']
     message_id = event['messageId']
     
-    print(f"Retrieving email with messageId [{message_id}] from S3 bucket [{bucket_name}]")
-    obj = s3.get_object(Bucket=bucket_name, Key=message_id)
+    print(f"Retrieving email with messageId [{message_id}] from S3 bucket [{email_bucket_name}]")
+    obj = s3.get_object(Bucket=email_bucket_name, Key=message_id)
     email_content = obj['Body'].read().decode('utf-8')
     
     print(f"Successfully retrieved email with messageId [{message_id}]! Parsing email...")
@@ -38,6 +38,6 @@ def handler(event, context):
         'statusCode': 200,
         'messageId': message_id,
         'attachments': attachments,
-        'bucketName': bucket_name
+        'bucketName': email_bucket_name
     }
     
