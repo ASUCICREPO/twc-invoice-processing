@@ -6,14 +6,15 @@ s3 = boto3.client('s3')
 
 def handler(event, context):
     print(f"Extracting PDF attachment from the email...")
-    bucket_name = os.environ['BUCKET_NAME']
+    email_bucket_name = os.environ['EMAIL_BUCKET_NAME']
+    artefact_bucket_name = os.environ['ARTEFACT_BUCKET_NAME']
     message_id = event['messageId']
     attachment_filename = event['filename']
     
     pdf_key = f'invoices/{message_id}/{attachment_filename}'
     pdf_data = None
     
-    obj = s3.get_object(Bucket=bucket_name, Key=message_id)
+    obj = s3.get_object(Bucket=email_bucket_name, Key=message_id)
     email_content = obj['Body'].read().decode('utf-8')
     msg = email.message_from_string(email_content)
     for part in msg.walk():
@@ -23,15 +24,15 @@ def handler(event, context):
     
     if pdf_data:
         try:
-            print(f"Saving PDF to bucket [{bucket_name}], at location [{pdf_key}]...")
+            print(f"Saving PDF to bucket [{artefact_bucket_name}], at location [{pdf_key}]...")
             
             s3.put_object(
-                Bucket=bucket_name,
+                Bucket=artefact_bucket_name,
                 Key=pdf_key,
                 Body=pdf_data,
                 ContentType='application/pdf'
             )
-            print(f"Successfully saved PDF to bucket [{bucket_name}], at location [{pdf_key}]!")
+            print(f"Successfully saved PDF to bucket [{artefact_bucket_name}], at location [{pdf_key}]!")
             result = {
                 'statusCode': 200,
                 'status': 'success',

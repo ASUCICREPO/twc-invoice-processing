@@ -74,11 +74,12 @@ def create_pdf_from_doc(content):
 
 def handler(event, context):
     print(f"Processing Word Document attachment...")
-    bucket_name = os.environ['BUCKET_NAME']
+    email_bucket_name = os.environ['EMAIL_BUCKET_NAME']
+    artefact_bucket_name = os.environ['ARTEFACT_BUCKET_NAME']
     message_id = event['messageId']
     attachment_filename = event['filename']
     try:
-        obj = s3.get_object(Bucket=bucket_name, Key=message_id)
+        obj = s3.get_object(Bucket=email_bucket_name, Key=message_id)
         email_content = obj['Body'].read().decode('utf-8')
         
         doc_data = None
@@ -101,7 +102,7 @@ def handler(event, context):
         original_filename = os.path.splitext(attachment_filename)[0]
         pdf_key = f'invoices/{message_id}/{original_filename}.pdf'
         s3.put_object(
-            Bucket=bucket_name,
+            Bucket=artefact_bucket_name,
             Key=pdf_key,
             Body=pdf_data,
             ContentType='application/pdf'

@@ -95,13 +95,14 @@ def create_pdf_from_excel(df):
 def handler(event, context):
     print("Processing Excel attachment...")
     try:
-        bucket_name = os.environ['BUCKET_NAME']
+        email_bucket_name = os.environ['EMAIL_BUCKET_NAME']
+        artefact_bucket_name = os.environ['ARTEFACT_BUCKET_NAME']
         message_id = event['messageId']
         attachment_filename = event['filename']
         
         # Get email from S3
         try:
-            obj = s3.get_object(Bucket=bucket_name, Key=message_id)
+            obj = s3.get_object(Bucket=email_bucket_name, Key=message_id)
             email_content = obj['Body'].read().decode('utf-8')
         except Exception as e:
             print(f"Error reading from S3: {str(e)}")
@@ -135,7 +136,7 @@ def handler(event, context):
         pdf_key = f'invoices/{message_id}/{original_filename}.pdf'
         print(f"Saving PDF to S3: {pdf_key}")
         s3.put_object(
-            Bucket=bucket_name,
+            Bucket=artefact_bucket_name,
             Key=pdf_key,
             Body=pdf_data,
             ContentType='application/pdf'
