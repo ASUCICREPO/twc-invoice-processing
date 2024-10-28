@@ -21,7 +21,7 @@ def get_account_assignment_rules(bucket_name):
         return json.loads(response['Body'].read().decode('utf-8'))
     except Exception as e:
         print(f"Error getting account assignment rules: {str(e)}")
-        raise
+        raise e
 
 def determine_account_assignment(vendor_name, invoice_number, bucket_name):
     print("Finding Accountant name...")
@@ -76,7 +76,7 @@ Response format:
         print("Received response from Claude!")
     except Exception as e:
         print(f"Error occurred while calling Claude: {str(e)}")
-        raise
+        raise e
     
     try:
         response_body = json.loads(response['body'].read())
@@ -131,10 +131,11 @@ def handler(event, context):
     textract_jobs = event['textractJobs']
     
     invoice_headers = ['ReceiptDate', 'ReceiptTime', 'InvoiceNbr', 'VendorName', 'Amount', 'AcctAssigned']
-    log_headers = ['MessageId', 'InvoiceNbr', 'Status', 'ErrorReason', 'LLMConfidence']
+    log_headers = ['Timestamp', 'MessageId', 'InvoiceNbr', 'Status', 'ErrorReason', 'LLMConfidence']
     
     for job in textract_jobs:
         # Extract message ID from PDF key
+        print(f"Job JSON: {job}")
         message_id = job['pdfKey'].split('/')[1]
         
         print(f"Fetching email datetime and determine target date for email with Message ID: [{message_id}]")
@@ -143,6 +144,7 @@ def handler(event, context):
         
         # Prepare log data
         log_data = {
+            'Timestamp': email_datetime,
             'MessageId': message_id,
             'InvoiceNbr': '',
             'Status': 'Success',
@@ -183,46 +185,50 @@ def handler(event, context):
                         elif field_type == 'TOTAL':
                             amount = field_value
                 if invoice_number == "":
-                    raise Exception("Could not find invoice number, the document is not an invoice!")
-                if vendor_name == "":
-                    raise Exception("Could not find vendor name, the document is not an invoice!")
-                
-                print("Fetching Account Assignee value...")
-                account_assignment = determine_account_assignment(
-                    vendor_name, 
-                    invoice_number,
-                    artefact_bucket_name
-                )
-                assigned_accountant = account_assignment['accountant'] if account_assignment else ''
-                
-                log_data['InvoiceNbr'] = invoice_number
-                log_data['LLMConfidence'] = account_assignment['confidence'] if account_assignment else ''
-                
-                print("Get or create CSV for business day")
-                csv_filename, existing_rows = get_or_create_csv(target_date, result_bucket_name, "invoices", invoice_headers)
-                
-                # Add new row
-                new_row = [
-                    email_datetime.strftime('%Y-%m-%d'),
-                    email_datetime.strftime('%H:%M:%S'),
-                    invoice_number,
-                    vendor_name,
-                    amount,
-                    assigned_accountant
-                ]
-                existing_rows.append(new_row)
-                
-                print("Write the CSV back to S3")
-                output = io.StringIO()
-                csv_writer = csv.writer(output)
-                csv_writer.writerows(existing_rows)
-                
-                s3_client.put_object(
-                    Bucket=result_bucket_name,
-                    Key=csv_filename,
-                    Body=output.getvalue()
-                )
-                print(f"Successfully processed invoice from PDF: {job['pdfKey']}")
+                    log_data['Status'] = 'Ignore'
+                    log_data['ErrorReason'] = f"No Invoice Number found"
+                    print(f"No Invoice Number found for PDF: {job['pdfKey']}. Ignoring.")
+                elif vendor_name == "":
+                    log_data['Status'] = 'Ignore'
+                    log_data['ErrorReason'] = f"No Vendor Name found"
+                    print(f"No Vendor Name found for PDF: {job['pdfKey']}. Ignoring.")
+                else:
+                    print("Fetching Account Assignee value...")
+                    account_assignment = determine_account_assignment(
+                        vendor_name, 
+                        invoice_number,
+                        artefact_bucket_name
+                    )
+                    assigned_accountant = account_assignment['accountant'] if account_assignment else ''
+                    
+                    log_data['InvoiceNbr'] = invoice_number
+                    log_data['LLMConfidence'] = account_assignment['confidence'] if account_assignment else ''
+                    
+                    print("Get or create CSV for business day")
+                    csv_filename, existing_rows = get_or_create_csv(target_date, result_bucket_name, "invoices", invoice_headers)
+                    
+                    # Add new row
+                    new_row = [
+                        email_datetime.strftime('%Y-%m-%d'),
+                        email_datetime.strftime('%H:%M:%S'),
+                        invoice_number,
+                        vendor_name,
+                        amount,
+                        assigned_accountant
+                    ]
+                    existing_rows.append(new_row)
+                    
+                    print("Write the CSV back to S3")
+                    output = io.StringIO()
+                    csv_writer = csv.writer(output)
+                    csv_writer.writerows(existing_rows)
+                    
+                    s3_client.put_object(
+                        Bucket=result_bucket_name,
+                        Key=csv_filename,
+                        Body=output.getvalue()
+                    )
+                    print(f"Successfully processed invoice from PDF: {job['pdfKey']}")
             except Exception as e:
                 log_data['Status'] = 'Error'
                 log_data['ErrorReason'] = str(e)
