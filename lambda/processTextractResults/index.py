@@ -173,26 +173,50 @@ def handler(event, context):
                 amount = 0.0
                 
                 print("Finding relevant values from Textract result...")
+                statement_keywords = ['statement', 'statements', 'statement as of', 'statement of']
+                
                 for expense_doc in results.get('ExpenseDocuments', []):
+                    if(log_data['Status'] == 'Ignore'):
+                        break
+                     # Check all blocks for statement keywords
+                    for block in expense_doc.get('Blocks', []):
+                        block_text = block.get('Text', '').lower()
+                        if any(keyword in block_text for keyword in statement_keywords):
+                            log_data['Status'] = 'Ignore'
+                            log_data['ErrorReason'] = 'Statement document detected'
+                            print(f"Document: {job['pdfKey']} is a Statement. Ignoring.")
+                            break
+                    
+                    if log_data['Status'] == 'Ignore':
+                        break
+
                     for field in expense_doc.get('SummaryFields', []):
                         field_type = field.get('Type', {}).get('Text', '')
                         field_value = field.get('ValueDetection', {}).get('Text', '')
+                        field_label = field.get('LabelDetection', {}).get('Text', '')
                         
                         if field_type == 'INVOICE_RECEIPT_ID':
+                            if "quote" in field_label.lower() or "estimate" in field_label.lower():
+                                log_data['Status'] = 'Ignore'
+                                log_data['ErrorReason'] = f"Quote or Estimate document detected"
+                                print(f"Document: {job['pdfKey']} is a Quote or Estimate. Ignoring.")
+                                break
+                            if field_value == "":
+                                log_data['Status'] = 'Ignore'
+                                log_data['ErrorReason'] = f"No Invoice Number found"
+                                print(f"No Invoice Number found for PDF: {job['pdfKey']}. Ignoring.")
+                                break
                             invoice_number = field_value
                         elif field_type == 'VENDOR_NAME':
+                            if field_value == "":
+                                log_data['Status'] = 'Ignore'
+                                log_data['ErrorReason'] = f"No Vendor Name found"
+                                print(f"No Vendor Name found for PDF: {job['pdfKey']}. Ignoring.")
+                                break
                             vendor_name = field_value
                         elif field_type == 'TOTAL':
                             amount = field_value
-                if invoice_number == "":
-                    log_data['Status'] = 'Ignore'
-                    log_data['ErrorReason'] = f"No Invoice Number found"
-                    print(f"No Invoice Number found for PDF: {job['pdfKey']}. Ignoring.")
-                elif vendor_name == "":
-                    log_data['Status'] = 'Ignore'
-                    log_data['ErrorReason'] = f"No Vendor Name found"
-                    print(f"No Vendor Name found for PDF: {job['pdfKey']}. Ignoring.")
-                else:
+                if log_data['Status'] != 'Ignore':
                     print("Fetching Account Assignee value...")
                     account_assignment = determine_account_assignment(
                         vendor_name, 
@@ -228,7 +252,6 @@ def handler(event, context):
                         Key=csv_filename,
                         Body=output.getvalue()
                     )
-                    print(f"Successfully processed invoice from PDF: {job['pdfKey']}")
             except Exception as e:
                 log_data['Status'] = 'Error'
                 log_data['ErrorReason'] = str(e)
