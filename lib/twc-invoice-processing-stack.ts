@@ -7,9 +7,13 @@ import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
 import * as stepfunctions_tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 
 interface TwcInvoiceProcessingStackProps extends cdk.StackProps {
   domain: string;
+  senderEmail: string;
+  recipientEmails: string[];
 }
 
 export class TwcInvoiceProcessingStack extends cdk.Stack {
@@ -323,6 +327,41 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
     });
     processIncomingEmailLambda.addEnvironment('STATE_MACHINE_ARN', stateMachine.stateMachineArn);
     stateMachine.grantStartExecution(processIncomingEmailLambda);
+
+    const sendDailyEmailLambda = new lambda.Function(this, 'sendDailyEmail', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset('lambda/sendDailyEmail'),
+      environment: {
+        RESULT_BUCKET_NAME: resultBucket.bucketName,
+        SENDER_EMAIL: props.senderEmail,
+        RECIPIENT_EMAILS: props.recipientEmails.join(',')
+      },
+      timeout: cdk.Duration.minutes(5)
+    });
+    
+    // Grant permissions
+    resultBucket.grantRead(sendDailyEmailLambda);
+    sendDailyEmailLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ses:SendRawEmail'],
+      resources: ['*']
+    }));
+    
+    new events.Rule(this, 'weekdayReportSchedule', {
+      schedule: events.Schedule.cron({
+        minute: '*',
+        hour: '23',
+        weekDay: 'MON-FRI',
+        month: '*',
+        year: '*'
+      }),
+      targets: [new targets.LambdaFunction(sendDailyEmailLambda)]
+    });
+    
+    // Verify sender email in SES
+    new ses.EmailIdentity(this, 'SenderEmailIdentity', {
+      identity: ses.Identity.email(props.senderEmail)
+    });
     
     // Create SES Rule Set
     const sesRuleSet = new ses.ReceiptRuleSet(this, 'twc-email-rule-set', {
