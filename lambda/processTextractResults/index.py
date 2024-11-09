@@ -1,36 +1,205 @@
 import json
 import boto3
 import os
+import datetime
 from datetime import timedelta
 import pytz
 import csv
 import io
 from email import parser
 from email.utils import parsedate_to_datetime
+from typing import Dict, List, Tuple, Optional
 
-bedrock_runtime = boto3.client('bedrock-runtime')
-s3_client = boto3.client('s3')
 
-def get_account_assignment_rules(bucket_name):
-    print("Fetching the rule set...")
-    try:
-        response = s3_client.get_object(
-            Bucket=bucket_name,
-            Key='account_assignment_rules.json'
+class InvoiceProcessor:
+    def __init__(self, email_bucket: str, artefact_bucket: str, result_bucket: str, timezone: str):
+        print(f"Initializing InvoiceProcessor with buckets: email={email_bucket}, artefact={artefact_bucket}, result={result_bucket}")
+        self.email_bucket = email_bucket
+        self.artefact_bucket = artefact_bucket
+        self.result_bucket = result_bucket
+        self.timezone = timezone
+        self.bedrock_runtime = boto3.client('bedrock-runtime')
+        self.s3_client = boto3.client('s3')
+        
+        self.INVOICE_HEADERS = ['ReceiptDate', 'ReceiptTime', 'InvoiceNbr', 'VendorName', 'Amount', 'AcctAssigned']
+        self.LOG_HEADERS = ['Timestamp', 'MessageId', 'InvoiceNbr', 'Status', 'ErrorReason', 'LLMConfidence']
+    
+    def _extract_email_datetime(self, message_id: str) -> datetime:
+        """Extract datetime from email metadata."""
+        print(f"Extracting datetime from email with message_id: {message_id}")
+        obj = self.s3_client.get_object(Bucket=self.email_bucket, Key=message_id)
+        email_content = obj['Body'].read().decode('utf-8')
+        email_message = parser.Parser().parsestr(email_content)
+        email_datetime = parsedate_to_datetime(email_message['Date'])
+        local_tz = pytz.timezone(self.timezone)
+        return email_datetime.astimezone(local_tz)
+    
+    def _get_next_business_day(self, date) -> datetime:
+        """Calculate the next business day."""
+        print(f"Calculating next business day from date: {date}")
+        if (date.weekday() == 4 and date.hour >= 17) or date.weekday() in [5, 6]:
+            days_ahead = 7 - date.weekday()
+            next_business = date + timedelta(days=days_ahead)
+            result = next_business.replace(hour=8, minute=0, second=0, microsecond=0)
+            print(f"Weekend detected - Next business day: {result}")
+            return result
+        
+        if date.hour >= 17:
+            next_day = date + timedelta(days=1)
+            result = next_day.replace(hour=8, minute=0, second=0, microsecond=0)
+            print(f"After hours detected - Next business day: {result}")
+            return result
+        
+        print(f"Using same business day: {date}")
+        return date
+    
+    def _initialize_log_data(self, message_id: str, email_datetime: datetime) -> dict:
+        """Initialize the log data structure with default values."""
+        print(f"Initializing log data for message_id: {message_id}")
+        return {
+            'Timestamp': email_datetime,
+            'MessageId': message_id,
+            'InvoiceNbr': '',
+            'Status': 'Success',
+            'ErrorReason': '',
+            'LLMConfidence': ''
+        }
+        
+    def _is_valid_job(self, job: dict, log_data: dict) -> bool:
+        """Check if the Textract job completed successfully."""
+        print(f"Checking Textract job validity - JobId: {job.get('jobId')}, Status: {job.get('jobStatus')}")
+        if job['jobStatus'] != 'SUCCEEDED' or 'resultsKey' not in job:
+            log_data['Status'] = 'Error'
+            log_data['ErrorReason'] = f"Textract Job status: {job['jobStatus']}"
+            print(f"Error: Invalid Textract job - Status: {job['jobStatus']}, ResultsKey present: {'resultsKey' in job}")
+            return False
+        return True
+
+    def _get_or_create_csv(self, date: datetime, suffix: str, headers: List[str]) -> Tuple[str, List[List[str]]]:
+        """Get existing CSV or create new one with headers."""
+        csv_filename = f"{date.strftime('%Y-%m-%d')}_{suffix}.csv"
+        print(f"Accessing CSV file: {csv_filename}")
+        
+        try:
+            csv_obj = self.s3_client.get_object(Bucket=self.result_bucket, Key=csv_filename)
+            csv_content = csv_obj['Body'].read().decode('utf-8')
+            print(f"Existing CSV file found: {csv_filename}")
+            return csv_filename, list(csv.reader(io.StringIO(csv_content)))
+        except self.s3_client.exceptions.NoSuchKey:
+            print(f"Creating new CSV file: {csv_filename}")
+            return csv_filename, [headers]
+        
+    def _write_csv(self, filename: str, rows: List[List[str]]) -> None:
+        """Write CSV data to S3."""
+        print(f"Writing {len(rows)} rows to CSV file: {filename}")
+        output = io.StringIO()
+        csv.writer(output).writerows(rows)
+        self.s3_client.put_object(
+            Bucket=self.result_bucket,
+            Key=filename,
+            Body=output.getvalue()
         )
-        return json.loads(response['Body'].read().decode('utf-8'))
-    except Exception as e:
-        print(f"Error getting account assignment rules: {str(e)}")
-        raise e
+        print(f"Successfully wrote data to {filename}")
 
-def determine_account_assignment(vendor_name, invoice_number, bucket_name):
-    print("Finding Accountant name...")
-    rules = get_account_assignment_rules(bucket_name)
-    if not rules:
-        return None
+    def _update_logs(self, target_date: datetime, log_data: dict) -> None:
+        """Update the logs CSV file with new log data."""
+        print(f"Updating logs for date: {target_date}, Status: {log_data['Status']}")
+        log_csv_filename, log_rows = self._get_or_create_csv(
+            target_date,
+            'logs',
+            self.LOG_HEADERS
+        )
+        
+        log_rows.append([log_data[header] for header in self.LOG_HEADERS])
+        self._write_csv(log_csv_filename, log_rows)
+        
+    def _is_invalid_document(self, expense_doc: dict, log_data: dict) -> bool:
+        """Check if the document is invalid (e.g., statement, quote, etc.)."""
+        print("Checking for invalid document types...")
+        statement_keywords = ['statement', 'statements', 'statement as of', 'statement of']
+        
+        # Check for statements
+        for block in expense_doc.get('Blocks', []):
+            block_text = block.get('Text', '').lower()
+            if any(keyword in block_text for keyword in statement_keywords):
+                print(f"Invalid document detected - Statement keyword found: {block_text}")
+                log_data['Status'] = 'Ignore'
+                log_data['ErrorReason'] = 'Statement document detected'
+                return True
+        return False
 
-    print("Construct prompt for Claude")
-    prompt = f"""Given a vendor name: "{vendor_name}" and an invoice number: "{invoice_number}", determine the appropriate accountant assignment based on these rules:
+    def _is_quote_or_estimate(self, field_label: str) -> bool:
+        """Check if the document is a quote or estimate."""
+        result = "quote" in field_label.lower() or "estimate" in field_label.lower()
+        if result:
+            print(f"Quote or estimate detected in field label: {field_label}")
+        return result
+
+    def _extract_invoice_fields(self, expense_doc: dict, invoice_data: dict) -> dict:
+        """Extract invoice fields from Textract expense document."""
+        print("Extracting invoice fields from expense document...")
+        for field in expense_doc.get('SummaryFields', []):
+            field_type = field.get('Type', {}).get('Text', '')
+            field_value = field.get('ValueDetection', {}).get('Text', '')
+            field_label = field.get('LabelDetection', {}).get('Text', '')
+            
+            if field_type == 'INVOICE_RECEIPT_ID':
+                if self._is_quote_or_estimate(field_label):
+                    raise ValueError("Quote or Estimate document detected")
+                if invoice_data['invoice_number'] != '':
+                    continue
+                if not field_value:
+                    raise ValueError("No Invoice Number found")
+                invoice_data['invoice_number'] = field_value
+            
+            elif field_type == 'VENDOR_NAME':
+                if not field_value:
+                    raise ValueError("No Vendor Name found")
+                if invoice_data['vendor_name'] != '':
+                    continue
+                invoice_data['vendor_name'] = field_value
+            
+            elif field_type == 'TOTAL':
+                if invoice_data['amount'] != 0.0:
+                    continue
+                invoice_data['amount'] = field_value
+           
+        print(f"Extracted invoice data: {json.dumps(invoice_data)}")
+        return invoice_data
+    
+    def _process_workquest_invoice(self, expense_doc: dict, invoice_data: dict) -> dict:
+        """Special processing for Workquest invoices."""
+        print("Processing Workquest invoice...")
+        workquest_invoice_number_keywords = ['TINV']
+        
+        for block in expense_doc.get('Blocks', []):
+            block_text = block.get('Text', '')
+            if any(keyword in block_text for keyword in workquest_invoice_number_keywords):
+                print(f"Found Workquest invoice number: {block_text}")
+                invoice_data['invoice_number'] = block_text
+                break
+        
+        return invoice_data   
+    
+    def _get_account_assignment_ruless(self) -> dict:
+        """Fetch account assignment rules from S3."""
+        print("Fetching account assignment rules from S3...")
+        try:
+            response = self.s3_client.get_object(
+                Bucket=self.artefact_bucket,
+                Key='account_assignment_rules.json'
+            )
+            rules = json.loads(response['Body'].read().decode('utf-8'))
+            print(f"Successfully loaded {len(rules)} account assignment rules")
+            return rules
+        except Exception as e:
+            print(f"Error getting account assignment rules: {str(e)}")
+            raise 
+        
+    def _construct_claude_prompt(self, vendor_name: str, invoice_number: str, rules: dict) -> str:
+        """Construct the prompt for Claude to determine account assignment."""
+        print(f"Constructing Claude prompt for vendor: {vendor_name}, invoice: {invoice_number}")
+        return f"""Given a vendor name: "{vendor_name}" and an invoice number: "{invoice_number}", determine the appropriate accountant assignment based on these rules:
 
 {json.dumps(rules, indent=2)}
 
@@ -57,217 +226,140 @@ Response format:
     "confidence": "high/medium/low"
 }}"""
 
-    print("Sending request to Claude...")
-    try:
-        response = bedrock_runtime.invoke_model(
-            modelId="anthropic.claude-3-haiku-20240307-v1:0",
-            body=json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 200,
-                "temperature": 0,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ]
-            }).encode()
+    def determine_account_assignment(self, vendor_name: str, invoice_number: str) -> Optional[dict]:
+        """Determine account assignment using Claude."""
+        print(f"Determining account assignment for vendor: {vendor_name}, invoice: {invoice_number}")
+        rules = self._get_account_assignment_ruless()
+        if not rules:
+            print("No account assignment rules found")
+            return None
+
+        prompt = self._construct_claude_prompt(vendor_name, invoice_number, rules)
+        
+        try:
+            print("Invoking Claude model for account assignment...")
+            response = self.bedrock_runtime.invoke_model(
+                modelId="anthropic.claude-3-haiku-20240307-v1:0",
+                body=json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 200,
+                    "temperature": 0,
+                    "messages": [{"role": "user", "content": prompt}]
+                }).encode()
+            )
+            response_body = json.loads(response['body'].read())
+            result = json.loads(response_body['content'][0]['text'])
+            print(f"Claude assignment result: {json.dumps(result)}")
+            return result
+        except Exception as e:
+            print(f"Error in account assignment: {str(e)}")
+            return None
+    
+    def _save_invoice_data(self, invoice_data: dict, email_datetime: datetime, target_date: datetime, log_data: dict) -> None:
+        """Save processed invoice data to S3."""
+        print(f"Saving invoice data for date: {target_date}")
+        account_assignment = self.determine_account_assignment(
+            invoice_data['vendor_name'],
+            invoice_data['invoice_number']
         )
-        print("Received response from Claude!")
-    except Exception as e:
-        print(f"Error occurred while calling Claude: {str(e)}")
-        raise e
-    
-    try:
-        response_body = json.loads(response['body'].read())
-        result = response_body['content'][0]['text']
-        return json.loads(result)
-    except Exception as e:
-        print(f"Error occurred while trying to extract the JSON from Claude response: {str(e)}")
-
-def get_next_business_day(date):
-    if (date.weekday() == 4 and date.hour >= 17) or \
-       date.weekday() == 5 or date.weekday() == 6:
-        days_ahead = 7 - date.weekday()
-        next_business = date + timedelta(days=days_ahead)
-        return next_business.replace(hour=8, minute=0, second=0, microsecond=0)
-    
-    if date.hour >= 17:
-        next_day = date + timedelta(days=1)
-        return next_day.replace(hour=8, minute=0, second=0, microsecond=0)
-    
-    return date
-
-def extract_email_datetime(message_id, bucket_name, timezone):
-    obj = s3_client.get_object(Bucket=bucket_name, Key=message_id)
-    email_content = obj['Body'].read().decode('utf-8')
-    email_message = parser.Parser().parsestr(email_content)
-    date_str = email_message['Date']
-    email_datetime = parsedate_to_datetime(date_str)
-    
-    local_tz = pytz.timezone(timezone)
-    return email_datetime.astimezone(local_tz)
-
-def get_or_create_csv(date, result_bucket, suffix, headers):
-    csv_filename = f"{date.strftime('%Y-%m-%d')}_{suffix}.csv"
-    
-    try:
-        csv_obj = s3_client.get_object(Bucket=result_bucket, Key=csv_filename)
-        csv_content = csv_obj['Body'].read().decode('utf-8')
-        existing_rows = list(csv.reader(io.StringIO(csv_content)))
-    except s3_client.exceptions.NoSuchKey:
-        existing_rows = [headers]
-    
-    return csv_filename, existing_rows
-
-def handler(event, context):
-    print(f"Received event: {json.dumps(event)}")
-    
-    email_bucket_name = os.environ['INPUT_BUCKET_NAME']
-    artefact_bucket_name = os.environ['ARTEFACT_BUCKET_NAME']
-    result_bucket_name = os.environ['RESULT_BUCKET_NAME']
-    timezone = os.environ['TIMEZONE']
-    
-    textract_jobs = event['textractJobs']
-    
-    invoice_headers = ['ReceiptDate', 'ReceiptTime', 'InvoiceNbr', 'VendorName', 'Amount', 'AcctAssigned']
-    log_headers = ['Timestamp', 'MessageId', 'InvoiceNbr', 'Status', 'ErrorReason', 'LLMConfidence']
-    
-    for job in textract_jobs:
-        # Extract message ID from PDF key
-        print(f"Job JSON: {job}")
-        message_id = job['pdfKey'].split('/')[1]
         
-        print(f"Fetching email datetime and determine target date for email with Message ID: [{message_id}]")
-        email_datetime = extract_email_datetime(message_id, email_bucket_name, timezone)
-        target_date = get_next_business_day(email_datetime)
+        log_data['InvoiceNbr'] = invoice_data['invoice_number']
+        log_data['LLMConfidence'] = account_assignment['confidence'] if account_assignment else ''
+
+        csv_filename, existing_rows = self._get_or_create_csv(
+            target_date,
+            "invoices",
+            self.INVOICE_HEADERS
+        )
         
-        # Prepare log data
-        log_data = {
-            'Timestamp': email_datetime,
-            'MessageId': message_id,
-            'InvoiceNbr': '',
-            'Status': 'Success',
-            'ErrorReason': '',
-            'LLMConfidence': ''
+        new_row = [
+            email_datetime.strftime('%Y-%m-%d'),
+            email_datetime.strftime('%H:%M:%S'),
+            invoice_data['invoice_number'],
+            invoice_data['vendor_name'],
+            invoice_data['amount'],
+            account_assignment['accountant'] if account_assignment else ''
+        ]
+        
+        print(f"Adding new invoice row: {new_row}")
+        self._write_csv(csv_filename, existing_rows + [new_row])
+
+    def _process_textract_results(self, job: dict, log_data: dict) -> dict:
+        """Process Textract results and extract invoice information."""
+        print(f"Processing Textract results for job: {job.get('jobId')}")
+        results_obj = self.s3_client.get_object(
+            Bucket=self.artefact_bucket,
+            Key=job['resultsKey']
+        )
+        results = json.loads(results_obj['Body'].read().decode('utf-8'))
+        
+        invoice_data = {
+            'invoice_number': '',
+            'vendor_name': '',
+            'amount': 0.0
         }
         
-        if job['jobStatus'] != 'SUCCEEDED' or 'resultsKey' not in job:
-            log_data['Status'] = 'Error'
-            log_data['ErrorReason'] = f"Textract Job status: {job['jobStatus']}"
-            print(f"Error processing Textract Job with jobID: [{job['jobId']}]...")
+        for expense_doc in results.get('ExpenseDocuments', []):
+            print("Processing expense document...")
+            if self._is_invalid_document(expense_doc, log_data):
+                return invoice_data
+            
+            invoice_data = self._extract_invoice_fields(expense_doc, invoice_data)
+            
+            if invoice_data['vendor_name'].lower() == 'workquest':
+                print("Workquest vendor detected - using special processing")
+                invoice_data = self._process_workquest_invoice(expense_doc, invoice_data)
+                return invoice_data
+            
+        return invoice_data
         
-        # Get Textract results from S3
-        else:
-            try:
-                print(f"Fetching textract result for jobId: [{job['jobId']}]...")
-                results_obj = s3_client.get_object(
-                    Bucket=artefact_bucket_name,
-                    Key=job['resultsKey']
-                )
-                results = json.loads(results_obj['Body'].read().decode('utf-8'))
-                
-                # Extract fields from results
-                invoice_number = ""
-                vendor_name = ""
-                amount = 0.0
-                
-                print("Finding relevant values from Textract result...")
-                statement_keywords = ['statement', 'statements', 'statement as of', 'statement of']
-                
-                for expense_doc in results.get('ExpenseDocuments', []):
-                    if(log_data['Status'] == 'Ignore'):
-                        break
-                     # Check all blocks for statement keywords
-                    for block in expense_doc.get('Blocks', []):
-                        block_text = block.get('Text', '').lower()
-                        if any(keyword in block_text for keyword in statement_keywords):
-                            log_data['Status'] = 'Ignore'
-                            log_data['ErrorReason'] = 'Statement document detected'
-                            print(f"Document: {job['pdfKey']} is a Statement. Ignoring.")
-                            break
-                    
-                    if log_data['Status'] == 'Ignore':
-                        break
+    def process_textract_job(self, job: dict) -> None:
+        """Process a single Textract job."""
+        message_id = job['pdfKey'].split('/')[1]
+        print(f"\nProcessing Textract job for message_id: {message_id}")
+        email_datetime = self._extract_email_datetime(message_id)
+        target_date = self._get_next_business_day(email_datetime)
+        
+        log_data = self._initialize_log_data(message_id, email_datetime)
+        
+        if not self._is_valid_job(job, log_data):
+            print(f"Invalid job detected for message_id: {message_id}")
+            self._update_logs(target_date, log_data)
+            return
 
-                    for field in expense_doc.get('SummaryFields', []):
-                        field_type = field.get('Type', {}).get('Text', '')
-                        field_value = field.get('ValueDetection', {}).get('Text', '')
-                        field_label = field.get('LabelDetection', {}).get('Text', '')
-                        
-                        if field_type == 'INVOICE_RECEIPT_ID':
-                            if "quote" in field_label.lower() or "estimate" in field_label.lower():
-                                log_data['Status'] = 'Ignore'
-                                log_data['ErrorReason'] = f"Quote or Estimate document detected"
-                                print(f"Document: {job['pdfKey']} is a Quote or Estimate. Ignoring.")
-                                break
-                            if field_value == "":
-                                log_data['Status'] = 'Ignore'
-                                log_data['ErrorReason'] = f"No Invoice Number found"
-                                print(f"No Invoice Number found for PDF: {job['pdfKey']}. Ignoring.")
-                                break
-                            invoice_number = field_value
-                        elif field_type == 'VENDOR_NAME':
-                            if field_value == "":
-                                log_data['Status'] = 'Ignore'
-                                log_data['ErrorReason'] = f"No Vendor Name found"
-                                print(f"No Vendor Name found for PDF: {job['pdfKey']}. Ignoring.")
-                                break
-                            vendor_name = field_value
-                        elif field_type == 'TOTAL':
-                            amount = field_value
-                if log_data['Status'] != 'Ignore':
-                    print("Fetching Account Assignee value...")
-                    account_assignment = determine_account_assignment(
-                        vendor_name, 
-                        invoice_number,
-                        artefact_bucket_name
-                    )
-                    assigned_accountant = account_assignment['accountant'] if account_assignment else ''
-                    
-                    log_data['InvoiceNbr'] = invoice_number
-                    log_data['LLMConfidence'] = account_assignment['confidence'] if account_assignment else ''
-                    
-                    print("Get or create CSV for business day")
-                    csv_filename, existing_rows = get_or_create_csv(target_date, result_bucket_name, "invoices", invoice_headers)
-                    
-                    # Add new row
-                    new_row = [
-                        email_datetime.strftime('%Y-%m-%d'),
-                        email_datetime.strftime('%H:%M:%S'),
-                        invoice_number,
-                        vendor_name,
-                        amount,
-                        assigned_accountant
-                    ]
-                    existing_rows.append(new_row)
-                    
-                    print("Write the CSV back to S3")
-                    output = io.StringIO()
-                    csv_writer = csv.writer(output)
-                    csv_writer.writerows(existing_rows)
-                    
-                    s3_client.put_object(
-                        Bucket=result_bucket_name,
-                        Key=csv_filename,
-                        Body=output.getvalue()
-                    )
-            except Exception as e:
-                log_data['Status'] = 'Error'
-                log_data['ErrorReason'] = str(e)
-                print(f"Error processing invoice: {str(e)}")
-        print("Updating log CSV...")
-        log_csv_filename, log_rows = get_or_create_csv(target_date, result_bucket_name, 'logs', log_headers)
-        log_rows.append([log_data[header] for header in log_headers])
+        try:
+            invoice_data = self._process_textract_results(job, log_data)
+            if log_data['Status'] != 'Ignore':
+                print(f"Processing valid invoice for message_id: {message_id}")
+                self._save_invoice_data(invoice_data, email_datetime, target_date, log_data)
+        except Exception as e:
+            log_data['Status'] = 'Error'
+            log_data['ErrorReason'] = str(e)
+            print(f"Error processing invoice for message_id: {message_id}: {str(e)}")
         
-        print(f"Writing log CSV back to S3...")
-        log_output = io.StringIO()
-        csv.writer(log_output).writerows(log_rows)
-        s3_client.put_object(
-            Bucket=result_bucket_name,
-            Key=log_csv_filename,
-            Body=log_output.getvalue()
-        )
+        self._update_logs(target_date, log_data)
+        print(f"Completed processing for message_id: {message_id}, Status: {log_data['Status']}\n")
+
+def handler(event, context):
+    """AWS Lambda handler function."""
+    print(f"Received event: {json.dumps(event)}")
+    
+    processor = InvoiceProcessor(
+        email_bucket=os.environ['INPUT_BUCKET_NAME'],
+        artefact_bucket=os.environ['ARTEFACT_BUCKET_NAME'],
+        result_bucket=os.environ['RESULT_BUCKET_NAME'],
+        timezone=os.environ['TIMEZONE']
+    )
+    
+    total_jobs = len(event['textractJobs'])
+    print(f"Processing {total_jobs} Textract jobs")
+    
+    for i, job in enumerate(event['textractJobs'], 1):
+        print(f"\nProcessing job {i} of {total_jobs}")
+        processor.process_textract_job(job)
+    
+    print("Lambda handler execution completed successfully")
+
     return {
         'statusCode': 200,
         'message': 'Successfully processed Textract results'

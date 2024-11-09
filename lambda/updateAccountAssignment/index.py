@@ -10,7 +10,7 @@ def parse_account_assignment_rules(email_body):
     lines = email_body.split('\n')
     table_started = False
     header_read = False
-    rule_item = {"rule": "", "accountant_name": "", "exceptis_exceptionion": False}
+    rule_item = {"rule": "", "accountant_name": "", "is_exception": False}
     
     for line in lines:
         # Detect the start of the table
