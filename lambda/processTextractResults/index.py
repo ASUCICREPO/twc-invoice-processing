@@ -24,15 +24,24 @@ class InvoiceProcessor:
         self.INVOICE_HEADERS = ['ReceiptDate', 'ReceiptTime', 'InvoiceNbr', 'VendorName', 'Amount', 'AcctAssigned']
         self.LOG_HEADERS = ['Timestamp', 'MessageId', 'InvoiceNbr', 'Status', 'ErrorReason', 'LLMConfidence']
     
-    def _extract_email_datetime(self, message_id: str) -> datetime:
+    def _extract_email_details(self, message_id: str) -> datetime:
         """Extract datetime from email metadata."""
         print(f"Extracting datetime from email with message_id: {message_id}")
         obj = self.s3_client.get_object(Bucket=self.email_bucket, Key=message_id)
         email_content = obj['Body'].read().decode('utf-8')
         email_message = parser.Parser().parsestr(email_content)
+        # Extract body based on content type
+        if email_message.is_multipart():
+            for part in email_message.walk():
+                if part.get_content_type() == "text/plain":
+                    email_body = part.get_payload(decode=True).decode()
+                    break
+        else:
+            email_body = email_message.get_payload(decode=True).decode()
+        email_sender = email_message['From']
         email_datetime = parsedate_to_datetime(email_message['Date'])
         local_tz = pytz.timezone(self.timezone)
-        return email_datetime.astimezone(local_tz)
+        return email_datetime.astimezone(local_tz), email_sender, email_body
     
     def _get_next_business_day(self, date) -> datetime:
         """Calculate the next business day."""
@@ -181,37 +190,47 @@ class InvoiceProcessor:
         
         return invoice_data   
     
-    def _get_account_assignment_ruless(self) -> dict:
+    def _get_account_assignment_rules(self) -> dict:
         """Fetch account assignment rules from S3."""
         print("Fetching account assignment rules from S3...")
         try:
             response = self.s3_client.get_object(
                 Bucket=self.artefact_bucket,
-                Key='account_assignment_rules.json'
+                Key='account_assignment_rules.txt'
             )
-            rules = json.loads(response['Body'].read().decode('utf-8'))
+            rules = response['Body'].read().decode('utf-8')
             print(f"Successfully loaded {len(rules)} account assignment rules")
             return rules
         except Exception as e:
             print(f"Error getting account assignment rules: {str(e)}")
             raise 
         
-    def _construct_claude_prompt(self, vendor_name: str, invoice_number: str, rules: dict) -> str:
+    def _construct_claude_prompt(self, vendor_name: str, invoice_number: str, sender_email: str, email_body: str, rules: dict) -> str:
         """Construct the prompt for Claude to determine account assignment."""
         print(f"Constructing Claude prompt for vendor: {vendor_name}, invoice: {invoice_number}")
-        return f"""Given a vendor name: "{vendor_name}" and an invoice number: "{invoice_number}", determine the appropriate accountant assignment based on these rules:
+        return f"""Given a the following information about an invoice email:
+- Vendor name: "{vendor_name}" 
+- Invoice number: "{invoice_number}"
+- Sender email: "{sender_email}'
+- Email body excerpt: "{email_body[:500]}..."  # Truncating body for reasonable context
 
-{json.dumps(rules, indent=2)}
+Determine the appropriate accountant assignment based on these rules:
 
-Rules explanation:
-1. Each rule contains a rule (which can be a single letter, number, or specific vendor name) and an accountant name
-2. Some rules are marked as exceptions (is_exception: true)
-3. Some rules for have specific invoice_pattern requirements
+{rules}
+Context about the rules:
+1. The rules are written in plain English and may reference any combination of:
+   - Vendor names or patterns
+   - Invoice number patterns
+   - Sender email addresses or domains
+   - Keywords or patterns in the email body
+2. Some rules are marked as exceptions and should take precedence
+3. Rules may have multiple conditions that all need to be met
 
 Assignment logic:
-1. First, check for any matching exception rules (where is_exception is true)
-2. Use invoice number information present in the rule if applicable
-3. If no exception matches, use the standard rule based on the the vendor name
+1. First, check for any matching exception rules
+2. Look for rules that match multiple criteria (vendor, invoice, email, content)
+3. If no specific matches, use the most relevant general rule
+4. Consider the sender's email domain and email content for additional context
 
 Return your response as a JSON object with these fields only:
 - accountant: the assigned accountant's name
@@ -226,15 +245,15 @@ Response format:
     "confidence": "high/medium/low"
 }}"""
 
-    def determine_account_assignment(self, vendor_name: str, invoice_number: str) -> Optional[dict]:
+    def determine_account_assignment(self, vendor_name: str, invoice_number: str, sender_email: str, email_body: str) -> Optional[dict]:
         """Determine account assignment using Claude."""
         print(f"Determining account assignment for vendor: {vendor_name}, invoice: {invoice_number}")
-        rules = self._get_account_assignment_ruless()
+        rules = self._get_account_assignment_rules()
         if not rules:
             print("No account assignment rules found")
             return None
 
-        prompt = self._construct_claude_prompt(vendor_name, invoice_number, rules)
+        prompt = self._construct_claude_prompt(vendor_name, invoice_number, sender_email, email_body, rules)
         
         try:
             print("Invoking Claude model for account assignment...")
@@ -255,12 +274,14 @@ Response format:
             print(f"Error in account assignment: {str(e)}")
             return None
     
-    def _save_invoice_data(self, invoice_data: dict, email_datetime: datetime, target_date: datetime, log_data: dict) -> None:
+    def _save_invoice_data(self, invoice_data: dict, email_datetime: datetime, sender_email: str, email_body: str, target_date: datetime, log_data: dict) -> None:
         """Save processed invoice data to S3."""
         print(f"Saving invoice data for date: {target_date}")
         account_assignment = self.determine_account_assignment(
             invoice_data['vendor_name'],
-            invoice_data['invoice_number']
+            invoice_data['invoice_number'],
+            sender_email,
+            email_body
         )
         
         log_data['InvoiceNbr'] = invoice_data['invoice_number']
@@ -317,7 +338,7 @@ Response format:
         """Process a single Textract job."""
         message_id = job['pdfKey'].split('/')[1]
         print(f"\nProcessing Textract job for message_id: {message_id}")
-        email_datetime = self._extract_email_datetime(message_id)
+        email_datetime, email_sender, email_body = self._extract_email_details(message_id)
         target_date = self._get_next_business_day(email_datetime)
         
         log_data = self._initialize_log_data(message_id, email_datetime)
@@ -331,7 +352,7 @@ Response format:
             invoice_data = self._process_textract_results(job, log_data)
             if log_data['Status'] != 'Ignore':
                 print(f"Processing valid invoice for message_id: {message_id}")
-                self._save_invoice_data(invoice_data, email_datetime, target_date, log_data)
+                self._save_invoice_data(invoice_data, email_datetime, email_sender, email_body, target_date, log_data)
         except Exception as e:
             log_data['Status'] = 'Error'
             log_data['ErrorReason'] = str(e)
