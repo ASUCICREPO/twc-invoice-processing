@@ -349,7 +349,7 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
     
     new events.Rule(this, 'weekdayReportSchedule', {
       schedule: events.Schedule.cron({
-        minute: '*',
+        minute: '0',
         hour: '23',
         weekDay: 'MON-FRI',
         month: '*',
