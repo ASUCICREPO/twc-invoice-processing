@@ -25,21 +25,81 @@ export class TwcInvoiceProcessingStack extends cdk.Stack {
       autoDeleteObjects: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       versioned: true,
-      encryption: s3.BucketEncryption.S3_MANAGED
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      lifecycleRules: [
+        {
+          // Move non-current versions to infrequent access after 30 days
+          noncurrentVersionTransitions: [
+            {
+              storageClass: s3.StorageClass.INFREQUENT_ACCESS,
+              transitionAfter: cdk.Duration.days(30)
+            }
+          ],
+          // Delete non-current versions after 60 days
+          noncurrentVersionExpiration: cdk.Duration.days(60),
+          // Delete objects after 90 days
+          expiration: cdk.Duration.days(90)
+        }
+      ]
     });
 
     const artefactBucket = new s3.Bucket(this, 'twc-artefact-bucket', {
       autoDeleteObjects: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       versioned: true,
-      encryption: s3.BucketEncryption.S3_MANAGED
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      lifecycleRules: [
+        {
+          // Rule for textract_results directory
+          prefix: 'textract_results/',
+          transitions: [
+            {
+              storageClass: s3.StorageClass.INFREQUENT_ACCESS,
+              transitionAfter: cdk.Duration.days(30)  // Move to IA after a month
+            }
+          ],
+          noncurrentVersionExpiration: cdk.Duration.days(60),  // Keep versions for 60 days
+          expiration: cdk.Duration.days(90)  // Delete after 90 days
+        },
+        {
+          // Rule for invoices directory
+          prefix: 'invoices/',
+          transitions: [
+            {
+              storageClass: s3.StorageClass.INFREQUENT_ACCESS,
+              transitionAfter: cdk.Duration.days(30)  // Move to IA after a month
+            }
+          ],
+          noncurrentVersionExpiration: cdk.Duration.days(60),  // Keep versions for 60 days
+          expiration: cdk.Duration.days(90)  // Delete after 90 days
+        }
+      ]
     });
   
     const resultBucket = new s3.Bucket(this, 'twc-result-bucket', {
       autoDeleteObjects: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       versioned: true,
-      encryption: s3.BucketEncryption.S3_MANAGED
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      lifecycleRules: [
+        {
+          // Since files are emailed daily, we can be more aggressive with the cleanup
+          transitions: [
+            {
+              storageClass: s3.StorageClass.INFREQUENT_ACCESS,
+              transitionAfter: cdk.Duration.days(30)  // Move to IA after a month
+            }
+          ],
+          noncurrentVersionTransitions: [
+            {
+              storageClass: s3.StorageClass.INFREQUENT_ACCESS,
+              transitionAfter: cdk.Duration.days(30)  // Move non-current versions to IA after a month
+            }
+          ],
+          noncurrentVersionExpiration: cdk.Duration.days(60),  // Delete non-current versions after 60 days
+          expiration: cdk.Duration.days(90)  // Keep files for 90 days total
+        }
+      ]
     });
 
     // Create Lambda functions
