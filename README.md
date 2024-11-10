@@ -69,3 +69,11 @@ cdk deploy TwcInvoiceProcessingStack --context domain=<your-domain> --context se
 aws ses verify-domain-identity --domain <your-domain>
 aws ses verify-email-identity --email-address <your-sender-email>
 ```
+
+## Credits
+
+Developer: Priyam Bansal
+
+Architect: Arun Arunachalam
+
+This project is designed and developed with guidance and support from the ASU Cloud Innovation Center.
