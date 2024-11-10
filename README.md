@@ -15,7 +15,7 @@ The **Texas Workforce Commission (TWC) Invoice Processing System** automates the
 
 ## Architecture
 
-![Architecture Diagram](docs/architecture.jpg)
+![Architecture Diagram](docs/architecture.png)
 
 The system is built using the following AWS services:
 - **Amazon S3**: Stores incoming emails, processed artifacts (Textract results), and final CSV reports.
