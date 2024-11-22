@@ -3,7 +3,7 @@ Invoice processing workflow
 
 ## Overview
 
-TMany organisations automates the handling of invoices received via email. The system leverages AWS services such as Lambda, Textract, SES, S3, and AWS Bedrock to process invoices, extract relevant data, assign accountants using predefined rules or AI models, and generate daily reports. This system is designed to reduce manual effort, improve accuracy, and ensure scalability in processing large volumes of invoices.
+Many organisations automates the handling of invoices received via email. The system leverages AWS services such as Lambda, Textract, SES, S3, and AWS Bedrock to process invoices, extract relevant data, assign accountants using predefined rules or AI models, and generate daily reports. This system is designed to reduce manual effort, improve accuracy, and ensure scalability in processing large volumes of invoices.
 
 ## Features
 
