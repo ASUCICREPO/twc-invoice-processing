@@ -10,14 +10,14 @@ import { Construct } from 'constructs';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 
-interface TwcInvoiceProcessingStackProps extends cdk.StackProps {
+interface InvoiceProcessingStackProps extends cdk.StackProps {
   domain: string;
   senderEmail: string;
   recipientEmails: string[];
 }
 
-export class TwcInvoiceProcessingStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props: TwcInvoiceProcessingStackProps) {
+export class InvoiceProcessingStack extends cdk.Stack {
+  constructor(scope: Construct, id: string, props: InvoiceProcessingStackProps) {
     super(scope, id, props);
 
     // Create the S3 buckets
