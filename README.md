@@ -1,9 +1,9 @@
-# twc-invoice-processing
-Invoice processing workflow for Texas Workforce Commission
+# invoice-processing-app
+Invoice processing workflow
 
 ## Overview
 
-The **Texas Workforce Commission (TWC) Invoice Processing System** automates the handling of invoices received via email. The system leverages AWS services such as Lambda, Textract, SES, S3, and AWS Bedrock to process invoices, extract relevant data, assign accountants using predefined rules or AI models, and generate daily reports. This system is designed to reduce manual effort, improve accuracy, and ensure scalability in processing large volumes of invoices.
+Many organisations automates the handling of invoices received via email. The system leverages AWS services such as Lambda, Textract, SES, S3, and AWS Bedrock to process invoices, extract relevant data, assign accountants using predefined rules or AI models, and generate daily reports. This system is designed to reduce manual effort, improve accuracy, and ensure scalability in processing large volumes of invoices.
 
 ## Features
 
@@ -51,7 +51,7 @@ The system is built using the following AWS services:
 
 ```bash
 git clone <repository-url>
-cd twc-invoice-processing
+cd invoice-processing-app
 ```
 
 2. Install dependencies:
@@ -61,7 +61,7 @@ npm install
 
 3. Deploy the stack:
 ```bash
-cdk deploy TwcInvoiceProcessingStack --context domain=<your-domain> --context senderEmail=<your-sender-email> --context recipientEmails=<comma-separated-recipient-emails>
+cdk deploy InvoiceProcessingStack --context domain=<your-domain> --context senderEmail=<your-sender-email> --context recipientEmails=<comma-separated-recipient-emails>
 ```
 
 4. Verify that SES has been configured with your sender domain:
