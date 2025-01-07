@@ -1,8 +1,8 @@
 {
-  "name": "twc-invoice-processing",
+  "name": "invoice-processing-app",
   "version": "0.1.0",
   "bin": {
-    "twc-invoice-processing": "bin/twc-invoice-processing.js"
+    "invoice-processing-app": "bin/invoice-processing-app.js"
   },
   "scripts": {
     "build": "tsc",
